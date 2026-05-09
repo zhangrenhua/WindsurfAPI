@@ -28,7 +28,18 @@ let _bindHost = '0.0.0.0';
 
 // Per-tier requests-per-minute limits. Used for both filter-by-cap and
 // weighted selection (accounts with more headroom are preferred).
-const TIER_RPM = { pro: 60, free: 10, unknown: 20, expired: 0 };
+// Override per tier via env: WINDSURFAPI_RPM_PRO / _FREE / _UNKNOWN.
+// `expired` stays 0 — those accounts must not be picked.
+function tierRpmEnv(name, fallback) {
+  const n = parseInt(process.env[name] || '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+const TIER_RPM = {
+  pro:     tierRpmEnv('WINDSURFAPI_RPM_PRO',     60),
+  free:    tierRpmEnv('WINDSURFAPI_RPM_FREE',    10),
+  unknown: tierRpmEnv('WINDSURFAPI_RPM_UNKNOWN', 20),
+  expired: 0,
+};
 const RPM_WINDOW_MS = 60 * 1000;
 
 // Monotonic per-process counter so two reservations landing in the same
