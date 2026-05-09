@@ -172,6 +172,9 @@ function snapshotBatchJob(job) {
     successCount: job.successCount,
     failCount: job.failCount,
     skipCount: job.skipCount,
+    retryRound: job.retryRound,
+    retryMax: job.retryMax,
+    retryRemaining: job.retryRemaining,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     error: job.error,
@@ -236,10 +239,30 @@ async function processBatchImportTokenLine(line, autoAdd) {
   };
 }
 
+// Cool-down before each retry round. Failures in the first pass are
+// usually upstream rate limit / transient 5xx; giving the IP throttle
+// window a few seconds to drain raises the retry success rate
+// noticeably.
+const BATCH_RETRY_COOLDOWN_MS = 5000;
+// Default retry attempts for async jobs only. Sync handlers skip retry
+// to keep total wall time bounded and predictable for the operator
+// blocking on the HTTP response.
+const BATCH_ASYNC_RETRY_ATTEMPTS = 2;
+
+function bumpJobCounters(job, result, delta) {
+  if (result.skipped) job.skipCount += delta;
+  else if (result.success) job.successCount += delta;
+  else job.failCount += delta;
+}
+
 // Shared engine for both batch-import flavours. Caller hands in the
 // already-split lines and a per-line processor; we own the job-bookkeeping
-// (counters, status, fire-and-forget runner).
-function startGenericBatchJob(lines, processLine) {
+// (counters, status, fire-and-forget runner). When `maxRetries > 0`,
+// failed lines (success:false AND skipped:false) get re-run up to that
+// many additional rounds — successes and dedup-skips are left alone. The
+// per-result `attempt` tag lets the UI show "原始失败 / 第 1 次重试 / 第
+// 2 次重试" for retried entries.
+function startGenericBatchJob(lines, processLine, maxRetries = 0) {
   if (!lines.length) return null;
   const jobId = randomUUID();
   const job = {
@@ -249,6 +272,9 @@ function startGenericBatchJob(lines, processLine) {
     successCount: 0,
     failCount: 0,
     skipCount: 0,
+    retryRound: 0,
+    retryMax: maxRetries,
+    retryRemaining: maxRetries,
     results: [],
     startedAt: Date.now(),
     finishedAt: null,
@@ -260,14 +286,42 @@ function startGenericBatchJob(lines, processLine) {
   // Fire-and-forget. Per-line errors are absorbed by processLine itself;
   // the outer catch only fires on unexpected synchronous throws.
   (async () => {
+    // Initial pass — index of job.results[i] corresponds to lines[i].
     for (let i = 0; i < lines.length; i++) {
       if (i > 0 && BATCH_LINE_DELAY_MS > 0) await sleep(BATCH_LINE_DELAY_MS);
       const result = await processLine(lines[i]);
+      result.attempt = 0;
       job.results.push(result);
-      if (result.skipped) job.skipCount++;
-      else if (result.success) job.successCount++;
-      else job.failCount++;
+      bumpJobCounters(job, result, +1);
     }
+
+    // Retry rounds. Each round walks the current results, re-runs any
+    // entry that is still a non-skip failure, and updates the counters
+    // + result entry in place so the UI sees rolling improvements.
+    for (let round = 1; round <= maxRetries; round++) {
+      const retryIndices = [];
+      for (let i = 0; i < job.results.length; i++) {
+        const r = job.results[i];
+        if (!r.success && !r.skipped) retryIndices.push(i);
+      }
+      if (!retryIndices.length) break;
+      job.retryRound = round;
+      job.retryRemaining = maxRetries - round;
+      log.info(`batch-import job ${jobId} retry round ${round}/${maxRetries}: ${retryIndices.length} failures`);
+      if (BATCH_RETRY_COOLDOWN_MS > 0) await sleep(BATCH_RETRY_COOLDOWN_MS);
+      for (let k = 0; k < retryIndices.length; k++) {
+        if (k > 0 && BATCH_LINE_DELAY_MS > 0) await sleep(BATCH_LINE_DELAY_MS);
+        const idx = retryIndices[k];
+        const next = await processLine(lines[idx]);
+        next.attempt = round;
+        // Old entry was definitionally failCount; subtract it before
+        // re-bumping for whatever the retry produced.
+        bumpJobCounters(job, job.results[idx], -1);
+        job.results[idx] = next;
+        bumpJobCounters(job, next, +1);
+      }
+    }
+
     job.status = 'done';
     job.finishedAt = Date.now();
   })().catch(err => {
@@ -282,12 +336,12 @@ function startGenericBatchJob(lines, processLine) {
 
 function startBatchImportJob(text, autoAdd) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  return startGenericBatchJob(lines, line => processBatchImportLine(line, autoAdd));
+  return startGenericBatchJob(lines, line => processBatchImportLine(line, autoAdd), BATCH_ASYNC_RETRY_ATTEMPTS);
 }
 
 function startBatchImportTokenJob(text, autoAdd) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  return startGenericBatchJob(lines, line => processBatchImportTokenLine(line, autoAdd));
+  return startGenericBatchJob(lines, line => processBatchImportTokenLine(line, autoAdd), BATCH_ASYNC_RETRY_ATTEMPTS);
 }
 
 function json(res, status, body) {

@@ -3288,6 +3288,7 @@ docker compose up -d --force-recreate</pre>
                 const isSkip = !!r.skipped;
                 const badgeClass = isSkip ? 'info' : (r.success ? 'active' : 'error');
                 const badgeText = isSkip ? '跳过' : (r.success ? I18n.t('batch.success') : I18n.t('batch.fail'));
+                const retryTag = r.attempt ? ` <span class="text-xs" style="color:var(--text-dim)">(重试 ${r.attempt})</span>` : '';
                 let note;
                 if (isSkip) {
                   note = `<span class="text-sm" style="color:var(--text-dim)">已存在 · ${I18n.t('table.header.account')} ${this.esc(r.account?.id || '-')}</span>`;
@@ -3300,7 +3301,7 @@ docker compose up -d --force-recreate</pre>
                 return `
                 <tr>
                   <td>${this.esc(r.email || '-')}</td>
-                  <td><span class="badge ${badgeClass}">${badgeText}</span></td>
+                  <td><span class="badge ${badgeClass}">${badgeText}</span>${retryTag}</td>
                   <td class="text-sm">${note}</td>
                 </tr>`;
               }).join('')}
@@ -3481,11 +3482,12 @@ docker compose up -d --force-recreate</pre>
       const pct = j.total > 0 ? Math.round((j.processed / j.total) * 100) : 0;
       const skip = j.skipCount || 0;
       const skipPart = skip ? ` · 跳过 ${skip}` : '';
+      const retryPart = (j.retryRound && j.retryMax) ? ` · 重试 ${j.retryRound}/${j.retryMax} 轮` : '';
       this.showWindsurfLoginResult(`
         <div class="section-header">
           <div>
             <div class="section-title">异步批量导入 <span class="text-sm text-muted">job ${jobId.slice(0, 8)}</span></div>
-            <div class="section-desc">${j.processed}/${j.total} 已处理 · 成功 ${j.successCount} · 失败 ${j.failCount}${skipPart} · ${j.status}</div>
+            <div class="section-desc">${j.processed}/${j.total} 已处理 · 成功 ${j.successCount} · 失败 ${j.failCount}${skipPart}${retryPart} · ${j.status}</div>
           </div>
         </div>
         <div class="section-body">
@@ -3649,11 +3651,12 @@ docker compose up -d --force-recreate</pre>
       const pct = j.total > 0 ? Math.round((j.processed / j.total) * 100) : 0;
       const skip = j.skipCount || 0;
       const skipPart = skip ? ` · 跳过 ${skip}` : '';
+      const retryPart = (j.retryRound && j.retryMax) ? ` · 重试 ${j.retryRound}/${j.retryMax} 轮` : '';
       this.showWindsurfLoginResult(`
         <div class="section-header">
           <div>
             <div class="section-title">异步批量导入 Token <span class="text-sm text-muted">job ${jobId.slice(0, 8)}</span></div>
-            <div class="section-desc">${j.processed}/${j.total} 已处理 · 成功 ${j.successCount} · 失败 ${j.failCount}${skipPart} · ${j.status}</div>
+            <div class="section-desc">${j.processed}/${j.total} 已处理 · 成功 ${j.successCount} · 失败 ${j.failCount}${skipPart}${retryPart} · ${j.status}</div>
           </div>
         </div>
         <div class="section-body">
