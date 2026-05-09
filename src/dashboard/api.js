@@ -755,9 +755,31 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
         default: return true;
       }
     };
-    const all = getAccountList().filter(matchesFilter);
+    // Default ordering: highest remaining credit balance first so the
+    // operator's first page is the rows with most headroom. Falls
+    // through to weeklyPercent for accounts whose userStatus probe
+    // never landed, then unprobed rows sink to the bottom. Override
+    // with ?sort=raw to get insertion order back.
+    const sort = (url.searchParams.get('sort') || 'balance_desc').toLowerCase();
+    const balanceKey = (a) => {
+      const us = a?.userStatus;
+      if (us && typeof us.monthlyPromptCredits === 'number' && us.monthlyPromptCredits > 0) {
+        const used = typeof us.promptCreditsUsed === 'number' ? us.promptCreditsUsed : 0;
+        return us.monthlyPromptCredits - used;
+      }
+      const w = a?.credits?.weeklyPercent;
+      // Scale percent so it doesn't dominate over absolute counts on
+      // mixed pools (Trial + Pro). 100% ≈ 100k pseudo-credits — plenty
+      // ahead of unprobed (-1) but below most real Pro headroom.
+      if (typeof w === 'number') return w * 1000;
+      return -1;
+    };
+    let all = getAccountList().filter(matchesFilter);
+    if (sort === 'balance_desc') {
+      all = [...all].sort((a, b) => balanceKey(b) - balanceKey(a));
+    }
     const hasPaging = url.searchParams.has('page') || url.searchParams.has('pageSize');
-    if (!hasPaging) return json(res, 200, { accounts: all, total: all.length, status: filter });
+    if (!hasPaging) return json(res, 200, { accounts: all, total: all.length, status: filter, sort });
     const pageSize = Math.max(1, Math.min(500, parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
     const totalPages = Math.max(1, Math.ceil(all.length / pageSize));
     const page = Math.max(1, Math.min(totalPages, parseInt(url.searchParams.get('page') || '1', 10) || 1));
@@ -769,6 +791,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
       pageSize,
       totalPages,
       status: filter,
+      sort,
     });
   }
 
