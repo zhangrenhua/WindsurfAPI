@@ -1688,6 +1688,30 @@ window._firebaseOAuth = async function(provider) {
             </button>
           </div>
         </div>
+        <div style="margin-top:16px;padding-top:16px;border-top:1px dashed var(--border)">
+          <label class="field-label">批量导入 Auth Token</label>
+          <textarea
+            id="wl-batch-token-input"
+            class="textarea"
+            rows="6"
+            placeholder="eyJhbGciOiJI...token1...&#10;http://proxy:8080 eyJhbGciOiJI...token2... 标签可选&#10;socks5://1.2.3.4:1080 eyJhbGciOiJI...token3..."
+          ></textarea>
+          <div class="field-hint">每行一个 token。格式：<code>[代理] token [标签]</code>。token 来自 <code>windsurf.com/show-auth-token</code>，代理和标签可选。已注册的账号会自动跳过。</div>
+          <div class="field-row-actions">
+            <button class="btn btn-outline" onclick="App.pasteWindsurfBatchToken()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+              <span data-i18n="action.readClipboard">读取剪贴板</span>
+            </button>
+            <button class="btn btn-primary" onclick="App.windsurfTokenBatch()" id="wl-batch-token-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+              <span>批量导入 Token</span>
+            </button>
+            <button class="btn btn-outline" onclick="App.windsurfTokenBatchAsync()" id="wl-batch-token-async-btn" title="后台异步执行，避免长时间挂起；可关闭面板，任务在后台继续">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span>async</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -3489,6 +3513,174 @@ docker compose up -d --force-recreate</pre>
       if ((j.successCount || 0) > 0) {
         this.loadAccounts();
         document.getElementById('wl-batch-input').value = '';
+      }
+    };
+
+    const poll = async () => {
+      try {
+        const j = await this.api('GET', `/batch-import/async/${jobId}`);
+        if (!j || !j.id) {
+          this.toast('任务丢失，请刷新查看账号列表', 'error');
+          return true;
+        }
+        renderProgress(j);
+        if (j.status === 'done' || j.status === 'error') {
+          if (j.status === 'error') this.toast(`后台任务出错：${j.error || 'unknown'}`, 'error');
+          finalize(j);
+          return true;
+        }
+        return false;
+      } catch (err) {
+        this.toast(`轮询失败：${err.message}`, 'error');
+        return true;
+      }
+    };
+
+    await poll();
+    const timer = setInterval(async () => {
+      const stop = await poll();
+      if (stop) {
+        clearInterval(timer);
+        btn.disabled = false;
+        if (syncBtn) syncBtn.disabled = false;
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> <span>async</span>';
+      }
+    }, 2000);
+  },
+
+  async pasteWindsurfBatchToken() {
+    const el = document.getElementById('wl-batch-token-input');
+    if (!navigator.clipboard || !window.isSecureContext) {
+      el?.focus();
+      return this.toast(I18n.t('toast.clipboardUnsupported'), 'info');
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return this.toast(I18n.t('toast.clipboardEmpty'), 'info');
+      el.value = text;
+      this.toast(I18n.t('toast.clipboardRead'), 'success');
+    } catch (err) {
+      this.toast(I18n.t('toast.clipboardError', { error: err.message }), 'error');
+    }
+  },
+
+  async windsurfTokenBatch() {
+    const input = document.getElementById('wl-batch-token-input').value;
+    if (!input.trim()) return this.toast(I18n.t('batch.pasteFirst'), 'error');
+    const autoAdd = document.getElementById('wl-auto-add').checked;
+    const btn = document.getElementById('wl-batch-token-btn');
+    const lineCount = input.trim().split('\n').filter(l => l.trim()).length;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> ' + I18n.t('batch.importing');
+    this.showWindsurfLoginResult(`
+      <div class="section-header">
+        <div>
+          <div class="section-title">${I18n.t('batch.importing')}</div>
+          <div class="section-desc">${I18n.t('batch.importingDesc', {count: lineCount})}</div>
+        </div>
+      </div>`);
+
+    try {
+      const r = await this.api('POST', '/batch-import-tokens', { text: input, autoAdd });
+      if (!r.success || !Array.isArray(r.results)) {
+        const errKey = r.error ? `error.${r.error}` : null;
+        const msg = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (r.error || I18n.t('error.unknown'));
+        this.showWindsurfLoginResult(`
+          <div class="section-header"><div><div class="section-title" style="color:var(--error)">${I18n.t('loginResult.fail')}</div></div></div>
+          <div class="section-body"><p class="text-sm">${this.esc(msg)}</p></div>`);
+        return this.toast(msg, 'error');
+      }
+      this.renderBatchWindsurfLoginResult(r.results, autoAdd);
+      this.pushLoginHistoryEntries(r.results.map(item => ({
+        time: new Date().toISOString(),
+        email: item.email || item.token || 'token',
+        proxy: this.getWindsurfProxyLabel(item.proxy),
+        status: item.success ? 'success' : `error: ${item.error || 'unknown'}`,
+        apiKey: item.success ? (item.apiKey_masked || undefined) : undefined,
+      })));
+      const skip = r.skipCount || 0;
+      const tone = (r.failCount || 0) ? 'info' : 'success';
+      const baseMsg = I18n.t('batch.importComplete', {success: r.successCount || 0, fail: r.failCount || 0});
+      this.toast(skip ? `${baseMsg} · 跳过 ${skip}` : baseMsg, tone);
+      if ((r.successCount || 0) > 0) {
+        this.loadAccounts();
+        document.getElementById('wl-batch-token-input').value = '';
+      }
+    } catch (err) {
+      this.toast(err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg> <span>批量导入 Token</span>';
+    }
+  },
+
+  async windsurfTokenBatchAsync() {
+    const input = document.getElementById('wl-batch-token-input').value;
+    if (!input.trim()) return this.toast(I18n.t('batch.pasteFirst'), 'error');
+    const autoAdd = document.getElementById('wl-auto-add').checked;
+    const btn = document.getElementById('wl-batch-token-async-btn');
+    const syncBtn = document.getElementById('wl-batch-token-btn');
+    btn.disabled = true;
+    if (syncBtn) syncBtn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 启动中…';
+
+    let jobId = null;
+    try {
+      const start = await this.api('POST', '/batch-import-tokens/async', { text: input, autoAdd });
+      if (!start.success || !start.jobId) {
+        const errKey = start.error ? `error.${start.error}` : null;
+        const msg = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (start.error || I18n.t('error.unknown'));
+        this.toast(msg, 'error');
+        btn.disabled = false;
+        if (syncBtn) syncBtn.disabled = false;
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> <span>async</span>';
+        return;
+      }
+      jobId = start.jobId;
+    } catch (err) {
+      this.toast(err.message, 'error');
+      btn.disabled = false;
+      if (syncBtn) syncBtn.disabled = false;
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> <span>async</span>';
+      return;
+    }
+
+    const renderProgress = (j) => {
+      const pct = j.total > 0 ? Math.round((j.processed / j.total) * 100) : 0;
+      const skip = j.skipCount || 0;
+      const skipPart = skip ? ` · 跳过 ${skip}` : '';
+      this.showWindsurfLoginResult(`
+        <div class="section-header">
+          <div>
+            <div class="section-title">异步批量导入 Token <span class="text-sm text-muted">job ${jobId.slice(0, 8)}</span></div>
+            <div class="section-desc">${j.processed}/${j.total} 已处理 · 成功 ${j.successCount} · 失败 ${j.failCount}${skipPart} · ${j.status}</div>
+          </div>
+        </div>
+        <div class="section-body">
+          <div style="height:8px;background:var(--surface-2);border-radius:999px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:var(--success, #10b981);transition:width .3s"></div>
+          </div>
+        </div>`);
+    };
+
+    const finalize = (j) => {
+      if (Array.isArray(j.results) && j.results.length) {
+        this.renderBatchWindsurfLoginResult(j.results, autoAdd);
+        this.pushLoginHistoryEntries(j.results.map(item => ({
+          time: new Date().toISOString(),
+          email: item.email || item.token || 'token',
+          proxy: this.getWindsurfProxyLabel(item.proxy),
+          status: item.success ? 'success' : `error: ${item.error || 'unknown'}`,
+          apiKey: item.success ? (item.apiKey_masked || undefined) : undefined,
+        })));
+      }
+      const skip = j.skipCount || 0;
+      const tone = (j.failCount || 0) ? 'info' : 'success';
+      const baseMsg = I18n.t('batch.importComplete', { success: j.successCount || 0, fail: j.failCount || 0 });
+      this.toast(skip ? `${baseMsg} · 跳过 ${skip}` : baseMsg, tone);
+      if ((j.successCount || 0) > 0) {
+        this.loadAccounts();
+        document.getElementById('wl-batch-token-input').value = '';
       }
     };
 

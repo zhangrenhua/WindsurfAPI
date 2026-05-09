@@ -292,8 +292,13 @@ function createFriendlyAuthError(prefix, detail, fallback = 'ERR_LOGIN_FAILED') 
     'USER_DISABLED': 'ERR_USER_DISABLED',
     'TOO_MANY_ATTEMPTS_TRY_LATER': 'ERR_TOO_MANY_ATTEMPTS',
     'INVALID_EMAIL': 'ERR_INVALID_EMAIL',
+    'Rate limit exceeded. Please try again later.': 'ERR_RATE_LIMIT_EXCEEDED',
+    'Rate limit exceeded': 'ERR_RATE_LIMIT_EXCEEDED',
   };
-  const errorCode = errorCodeMap[normalized] || normalized || fallback;
+  const errorCode = errorCodeMap[normalized]
+    || (/^Rate limit/i.test(normalized) ? 'ERR_RATE_LIMIT_EXCEEDED' : null)
+    || normalized
+    || fallback;
   const err = new Error(errorCode);
   err.isAuthFail = [
     'EMAIL_NOT_FOUND',

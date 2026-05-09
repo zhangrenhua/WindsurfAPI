@@ -144,6 +144,16 @@ async function processBatchImportLine(line, autoAdd) {
 const _batchJobs = new Map();
 const BATCH_JOB_TTL_MS = 60 * 60 * 1000;
 
+// Inter-line delay for batch imports. Upstream /_devin-auth/password/login
+// rate-limits the egress IP (~10 req in a few seconds = "Rate limit
+// exceeded"). 800ms is empirically below that threshold; tunable via
+// WINDSURFAPI_BATCH_LINE_DELAY_MS for slow proxies / aggressive backoff.
+const BATCH_LINE_DELAY_MS = (() => {
+  const n = parseInt(process.env.WINDSURFAPI_BATCH_LINE_DELAY_MS || '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : 800;
+})();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 function pruneBatchJobs() {
   const now = Date.now();
   for (const [id, job] of _batchJobs) {
@@ -169,8 +179,61 @@ function snapshotBatchJob(job) {
   };
 }
 
-function startBatchImportJob(text, autoAdd) {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+// Per-line worker for /batch-import-tokens. Each line is `[proxy] token
+// [label]`; tokens are the long string copied from
+// windsurf.com/show-auth-token. Dedup happens via addAccountByToken
+// (it returns the pre-existing record when the resolved apiKey matches),
+// so we snapshot the account-id set before the call to flag dupes as
+// skipped — saves the operator a manual diff against the pool.
+async function processBatchImportTokenLine(line, autoAdd) {
+  const parts = line.split(/\s+/);
+  let proxy = null, token, label = '';
+  if (parts.length >= 2 && (parts[0].includes('://') || parts[0].includes(':'))) {
+    proxy = parts[0];
+    token = parts[1];
+    label = parts.slice(2).join(' ');
+  } else if (parts.length >= 1 && parts[0]) {
+    token = parts[0];
+    label = parts.slice(1).join(' ');
+  } else {
+    return { success: false, error: 'ERR_FORMAT_INVALID', label: line.slice(0, 30) };
+  }
+  if (!autoAdd) {
+    // Token import is meaningless without addAccountByToken's side
+    // effect (it both registers and stores). Reject explicitly so
+    // callers don't get back a half-shaped success object.
+    return { success: false, error: 'ERR_AUTOADD_REQUIRED', token: maskApiKey(token) };
+  }
+  const beforeIds = new Set(getAccountList().map(a => a.id));
+  let account;
+  try {
+    account = await addAccountByToken(token, label);
+  } catch (err) {
+    return { success: false, error: err.message, token: maskApiKey(token), proxy: proxy || undefined };
+  }
+  const skipped = beforeIds.has(account.id);
+  if (proxy) {
+    const parsed = parseProxyUrl(proxy);
+    if (parsed) {
+      setAccountProxy(account.id, parsed);
+      ensureLsForAccount(account.id).catch(() => {});
+    }
+  }
+  return {
+    success: true,
+    skipped,
+    email: account.email,
+    proxy: proxy || undefined,
+    apiKey_masked: maskApiKey(account.apiKey),
+    account: { id: account.id, email: account.email, status: account.status },
+    ...(skipped ? { error: 'ERR_ALREADY_EXISTS' } : {}),
+  };
+}
+
+// Shared engine for both batch-import flavours. Caller hands in the
+// already-split lines and a per-line processor; we own the job-bookkeeping
+// (counters, status, fire-and-forget runner).
+function startGenericBatchJob(lines, processLine) {
   if (!lines.length) return null;
   const jobId = randomUUID();
   const job = {
@@ -188,12 +251,12 @@ function startBatchImportJob(text, autoAdd) {
   _batchJobs.set(jobId, job);
   pruneBatchJobs();
 
-  // Fire-and-forget. Errors inside the loop are caught per-line by
-  // processBatchImportLine; the outer catch only fires on unexpected
-  // failures (e.g. the helper itself throws synchronously).
+  // Fire-and-forget. Per-line errors are absorbed by processLine itself;
+  // the outer catch only fires on unexpected synchronous throws.
   (async () => {
-    for (const line of lines) {
-      const result = await processBatchImportLine(line, autoAdd);
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0 && BATCH_LINE_DELAY_MS > 0) await sleep(BATCH_LINE_DELAY_MS);
+      const result = await processLine(lines[i]);
       job.results.push(result);
       if (result.skipped) job.skipCount++;
       else if (result.success) job.successCount++;
@@ -209,6 +272,16 @@ function startBatchImportJob(text, autoAdd) {
   });
 
   return job;
+}
+
+function startBatchImportJob(text, autoAdd) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  return startGenericBatchJob(lines, line => processBatchImportLine(line, autoAdd));
+}
+
+function startBatchImportTokenJob(text, autoAdd) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  return startGenericBatchJob(lines, line => processBatchImportTokenLine(line, autoAdd));
 }
 
 function json(res, status, body) {
@@ -1371,8 +1444,9 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
       if (!lines.length) return json(res, 400, { error: 'ERR_NO_VALID_LINES' });
 
       const results = [];
-      for (const line of lines) {
-        results.push(await processBatchImportLine(line, autoAdd));
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 && BATCH_LINE_DELAY_MS > 0) await sleep(BATCH_LINE_DELAY_MS);
+        results.push(await processBatchImportLine(lines[i], autoAdd));
       }
       const skipCount = results.filter(r => r.skipped).length;
       const successCount = results.filter(r => r.success && !r.skipped).length;
@@ -1429,6 +1503,43 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
     if (job.status === 'running') return json(res, 409, { error: 'ERR_JOB_RUNNING' });
     _batchJobs.delete(job.id);
     return json(res, 200, { success: true });
+  }
+
+  // ─── Batch auth-token import ──────────────────────────
+  // POST /batch-import-tokens        → sync, blocks until done
+  // POST /batch-import-tokens/async  → returns {jobId, total}; reuses
+  //                                    /batch-import/async/:jobId for polling
+  // Each line is `[proxy] <token> [label]`. Token = the long string from
+  // windsurf.com/show-auth-token. Proxy is optional (http://… or socks5://…).
+  if (subpath === '/batch-import-tokens' && method === 'POST') {
+    try {
+      const { text, autoAdd = true } = body || {};
+      if (!text || typeof text !== 'string') return json(res, 400, { error: 'ERR_TEXT_REQUIRED' });
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      if (!lines.length) return json(res, 400, { error: 'ERR_NO_VALID_LINES' });
+      const results = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 && BATCH_LINE_DELAY_MS > 0) await sleep(BATCH_LINE_DELAY_MS);
+        results.push(await processBatchImportTokenLine(lines[i], autoAdd));
+      }
+      const skipCount = results.filter(r => r.skipped).length;
+      const successCount = results.filter(r => r.success && !r.skipped).length;
+      const failCount = results.length - successCount - skipCount;
+      return json(res, 200, { success: true, total: results.length, successCount, failCount, skipCount, results });
+    } catch (err) {
+      return json(res, 400, { error: err.message });
+    }
+  }
+  if (subpath === '/batch-import-tokens/async' && method === 'POST') {
+    try {
+      const { text, autoAdd = true } = body || {};
+      if (!text || typeof text !== 'string') return json(res, 400, { error: 'ERR_TEXT_REQUIRED' });
+      const job = startBatchImportTokenJob(text, autoAdd);
+      if (!job) return json(res, 400, { error: 'ERR_NO_VALID_LINES' });
+      return json(res, 202, { success: true, jobId: job.id, total: job.total });
+    } catch (err) {
+      return json(res, 400, { error: err.message });
+    }
   }
 
   // ─── OAuth login (Google / GitHub via Firebase) ────────
