@@ -11,12 +11,28 @@
  * No buffering, so first-token latency matches the upstream Cascade stream.
  */
 
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomUUID, randomBytes, randomInt } from 'crypto';
 import { handleChatCompletions } from './chat.js';
 import { log } from '../config.js';
 
 function genMsgId() {
   return 'msg_' + randomUUID().replace(/-/g, '').slice(0, 24);
+}
+
+// Anthropic's native thinking blocks ship with a server-side `signature`
+// field that the SDK echoes back when it round-trips the assistant's
+// reasoning into the next request. Cascade upstream doesn't mint one,
+// so we stamp a Bedrock-shaped placeholder: standard base64 (A-Z a-z
+// 0-9 + / =), length 300-380 chars. Length is randomized per-call so
+// the field varies between turns the way real signatures do. This is a
+// cosmetic placeholder, not a cryptographic claim — clients that
+// forward the field opaquely are happy; clients that verify signatures
+// aren't supported regardless.
+function genThinkingSignature() {
+  // base64 of N bytes → ceil(N/3)*4 chars. Keep N in [225, 285] so the
+  // resulting base64 is in [300, 380] chars (always a multiple of 4).
+  const n = randomInt(225, 286);
+  return randomBytes(n).toString('base64');
 }
 
 // Anthropic Messages API tool types whose execution lives on Anthropic's
@@ -292,7 +308,7 @@ export function openAIToAnthropic(result, model, msgId) {
   const usage = result.usage || {};
   const content = [];
   if (choice?.message?.reasoning_content) {
-    content.push({ type: 'thinking', thinking: choice.message.reasoning_content });
+    content.push({ type: 'thinking', thinking: choice.message.reasoning_content, signature: genThinkingSignature() });
   }
   if (choice?.message?.tool_calls?.length) {
     if (choice.message.content) content.push({ type: 'text', text: choice.message.content });
@@ -425,6 +441,19 @@ class AnthropicStreamTranslator {
 
   closeCurrentBlock() {
     if (!this.current) return;
+    // Anthropic delivers the thinking-block signature as a final
+    // `signature_delta` before content_block_stop. The SDK accumulates
+    // it onto the block alongside the text deltas; clients that
+    // round-trip thinking back into the next request need the field
+    // present. Cascade upstream doesn't mint one, so we emit a
+    // Bedrock-shaped base64 placeholder (300-380 chars).
+    if (this.current.type === 'thinking') {
+      this.send('content_block_delta', {
+        type: 'content_block_delta',
+        index: this.current.index,
+        delta: { type: 'signature_delta', signature: genThinkingSignature() },
+      });
+    }
     this.send('content_block_stop', { type: 'content_block_stop', index: this.current.index });
     this.blockIndex++;
     this.current = null;
