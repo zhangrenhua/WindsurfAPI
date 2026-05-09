@@ -70,7 +70,19 @@ const DEFAULTS = {
     apiKey: '',
     dashboardPasswordHash: '',
   },
+  // Per-tier RPM overrides editable from the dashboard. `null` (or missing)
+  // means "no override — fall back to the env-seeded defaults baked into
+  // auth.js at startup". Numeric values must be non-negative integers; 0
+  // effectively disables the tier. `expired` is intentionally not exposed
+  // here — those accounts stay locked at 0 in auth.js.
+  tierRpm: {
+    pro: null,
+    free: null,
+    unknown: null,
+  },
 };
+
+const TIER_RPM_KEYS = ['pro', 'free', 'unknown'];
 
 const SYSTEM_PROMPT_KEYS = new Set(Object.keys(DEFAULTS.systemPrompts));
 
@@ -281,15 +293,53 @@ export function getEffectiveDashboardPasswordStored() {
   return runtime || config.dashboardPassword || '';
 }
 
-// Wire the auth module's pluggable API-key resolver so validateApiKey()
-// sees runtime overrides without a cyclic import. Done at module-load
-// time after `load()` so the file-backed value is honoured immediately.
+// ─── Per-tier RPM overrides ────────────────────────────────────────────
+
+export function getTierRpm() {
+  const out = {};
+  for (const k of TIER_RPM_KEYS) {
+    const v = _state.tierRpm?.[k];
+    out[k] = Number.isFinite(v) ? v : null;
+  }
+  return out;
+}
+
+export function setTierRpm(patch) {
+  if (!patch || typeof patch !== 'object') return getTierRpm();
+  const current = { ...(_state.tierRpm || {}) };
+  for (const k of TIER_RPM_KEYS) {
+    if (!(k in patch)) continue;
+    const raw = patch[k];
+    if (raw === null || raw === '' || raw === undefined) {
+      current[k] = null;
+      continue;
+    }
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0) current[k] = n;
+  }
+  _state.tierRpm = current;
+  persist();
+  return getTierRpm();
+}
+
+// Wire the auth module's pluggable resolvers so dashboard edits take
+// effect without a restart and without introducing a cyclic import. Done
+// at module-load time after `load()` so file-backed values are honoured
+// immediately on the next request.
 import('./auth.js').then(m => {
   if (typeof m.setApiKeyResolver === 'function') m.setApiKeyResolver(getEffectiveApiKey);
   // v2.0.58: same hook for drought-mode premium restriction so toggling
   // the flag from the dashboard takes effect without a restart.
   if (typeof m.setDroughtRestrictResolver === 'function') {
     m.setDroughtRestrictResolver(() => isExperimentalEnabled('droughtRestrictPremium'));
+  }
+  // Per-tier RPM resolver: returns numeric override or null (auth.js
+  // falls back to its env-seeded defaults when null/non-finite).
+  if (typeof m.setTierRpmResolver === 'function') {
+    m.setTierRpmResolver((tier) => {
+      const v = _state.tierRpm?.[tier];
+      return Number.isFinite(v) ? v : null;
+    });
   }
 }).catch(() => { /* auth not yet ready, validateApiKey falls back to env */ });
 

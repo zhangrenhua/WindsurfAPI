@@ -28,18 +28,27 @@ let _bindHost = '0.0.0.0';
 
 // Per-tier requests-per-minute limits. Used for both filter-by-cap and
 // weighted selection (accounts with more headroom are preferred).
-// Override per tier via env: WINDSURFAPI_RPM_PRO / _FREE / _UNKNOWN.
-// `expired` stays 0 — those accounts must not be picked.
+// Defaults can be overridden at startup via env (WINDSURFAPI_RPM_PRO /
+// _FREE / _UNKNOWN) and live-overridden from the dashboard via a resolver
+// injected from runtime-config.js. `expired` stays 0 — those accounts
+// must not be picked.
 function tierRpmEnv(name, fallback) {
   const n = parseInt(process.env[name] || '', 10);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
-const TIER_RPM = {
+const TIER_RPM_DEFAULTS = {
   pro:     tierRpmEnv('WINDSURFAPI_RPM_PRO',     60),
   free:    tierRpmEnv('WINDSURFAPI_RPM_FREE',    10),
   unknown: tierRpmEnv('WINDSURFAPI_RPM_UNKNOWN', 20),
   expired: 0,
 };
+let _tierRpmResolver = null;
+export function setTierRpmResolver(fn) {
+  _tierRpmResolver = typeof fn === 'function' ? fn : null;
+}
+export function getTierRpmDefaults() {
+  return { ...TIER_RPM_DEFAULTS };
+}
 const RPM_WINDOW_MS = 60 * 1000;
 
 // Monotonic per-process counter so two reservations landing in the same
@@ -64,7 +73,14 @@ function positiveIntEnv(name, fallback) {
 }
 
 function rpmLimitFor(account) {
-  return TIER_RPM[account.tier || 'unknown'] ?? 20;
+  const tier = account.tier || 'unknown';
+  if (_tierRpmResolver) {
+    try {
+      const v = _tierRpmResolver(tier);
+      if (Number.isFinite(v) && v >= 0) return v;
+    } catch { /* fall through to defaults */ }
+  }
+  return TIER_RPM_DEFAULTS[tier] ?? 20;
 }
 
 // v2.0.57 Fix 4 — quota headroom score. Reads the min of daily% and

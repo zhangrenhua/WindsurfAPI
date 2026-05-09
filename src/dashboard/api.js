@@ -15,6 +15,7 @@ import {
   getAccountInternal, isLocalBindHost, maskApiKey, safeEqualString,
   checkLockout, failedAuthAttempt, successfulAuthAttempt,
   getDroughtSummary,
+  getTierRpmDefaults,
 } from '../auth.js';
 import { restartLsForProxy } from '../langserver.js';
 import { getLsStatus, stopLanguageServer, startLanguageServer, isLanguageServerRunning } from '../langserver.js';
@@ -24,6 +25,7 @@ import {
   getExperimental, setExperimental, getSystemPrompts, setSystemPrompts, resetSystemPrompt,
   getCredentials, setRuntimeApiKey, setRuntimeDashboardPassword,
   verifyPassword, getEffectiveApiKey, getEffectiveDashboardPasswordStored,
+  getTierRpm, setTierRpm,
 } from '../runtime-config.js';
 import { poolStats as convPoolStats, poolClear as convPoolClear } from '../conversation-pool.js';
 import { getLogs, subscribeToLogs, unsubscribeFromLogs } from './logger.js';
@@ -266,6 +268,15 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
   if (subpath === '/experimental/conversation-pool' && method === 'DELETE') {
     const n = convPoolClear();
     return json(res, 200, { success: true, cleared: n });
+  }
+
+  // ─── Per-tier RPM (live-overridable from dashboard) ─────
+  if (subpath === '/tier-rpm' && method === 'GET') {
+    return json(res, 200, { overrides: getTierRpm(), defaults: getTierRpmDefaults() });
+  }
+  if (subpath === '/tier-rpm' && method === 'PUT') {
+    const overrides = setTierRpm(body || {});
+    return json(res, 200, { success: true, overrides, defaults: getTierRpmDefaults() });
   }
 
   // ─── System prompts (tool reinforcement, communication) ──

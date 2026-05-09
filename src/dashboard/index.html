@@ -2264,6 +2264,34 @@ window._firebaseOAuth = async function(provider) {
     <div class="section" style="margin-top:24px">
       <div class="section-header">
         <div>
+          <div class="section-title">每分钟请求数（RPM）</div>
+          <div class="section-desc">按账号 tier 限制每分钟可发起的上游请求数。留空 = 使用默认值（启动时由 env 决定）；填数字会覆盖默认并立即生效，写入 runtime-config.json。expired 账号永远锁 0，不在此处。</div>
+        </div>
+      </div>
+      <div class="section-body" style="display:grid;gap:14px">
+        <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius);display:grid;grid-template-columns:80px 1fr 1fr auto;gap:8px;align-items:center">
+          <strong>Pro</strong>
+          <input type="number" min="0" class="input" id="tier-rpm-pro" placeholder="默认">
+          <span class="text-sm text-muted" id="tier-rpm-pro-default"></span>
+          <button class="btn btn-primary btn-sm" onclick="App.saveTierRpm('pro')">保存</button>
+        </div>
+        <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius);display:grid;grid-template-columns:80px 1fr 1fr auto;gap:8px;align-items:center">
+          <strong>Free</strong>
+          <input type="number" min="0" class="input" id="tier-rpm-free" placeholder="默认">
+          <span class="text-sm text-muted" id="tier-rpm-free-default"></span>
+          <button class="btn btn-primary btn-sm" onclick="App.saveTierRpm('free')">保存</button>
+        </div>
+        <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius);display:grid;grid-template-columns:80px 1fr 1fr auto;gap:8px;align-items:center">
+          <strong>Unknown</strong>
+          <input type="number" min="0" class="input" id="tier-rpm-unknown" placeholder="默认">
+          <span class="text-sm text-muted" id="tier-rpm-unknown-default"></span>
+          <button class="btn btn-primary btn-sm" onclick="App.saveTierRpm('unknown')">保存</button>
+        </div>
+      </div>
+    </div>
+    <div class="section" style="margin-top:24px">
+      <div class="section-header">
+        <div>
           <div class="section-title" data-i18n="section.systemPrompts.title">系统提示词</div>
           <div class="section-desc" data-i18n="section.systemPrompts.desc">工具注入、对话模式等内置提示词模板。修改后立即生效，点"重置"恢复默认。</div>
         </div>
@@ -5344,6 +5372,9 @@ docker compose up -d --force-recreate</pre>
       </div>
     `;
 
+    // Per-tier RPM editor
+    this.loadTierRpm();
+
     // System prompts editor
     const sp = await this.api('GET', '/system-prompts');
     const spHolder = document.getElementById('system-prompts-editor');
@@ -5386,6 +5417,28 @@ docker compose up -d --force-recreate</pre>
     await this.api('DELETE', `/system-prompts/${encodeURIComponent(key)}`);
     this.toast(`${key} ${I18n.t('experimental.restored') || 'reset'}`, 'success');
     this.loadExperimental();
+  },
+
+  async loadTierRpm() {
+    const d = await this.api('GET', '/tier-rpm');
+    const overrides = d.overrides || {};
+    const defaults = d.defaults || {};
+    for (const tier of ['pro', 'free', 'unknown']) {
+      const input = document.getElementById(`tier-rpm-${tier}`);
+      const hint = document.getElementById(`tier-rpm-${tier}-default`);
+      if (input) input.value = (overrides[tier] === null || overrides[tier] === undefined) ? '' : overrides[tier];
+      if (hint) hint.textContent = `默认: ${defaults[tier] ?? '—'}`;
+    }
+  },
+
+  async saveTierRpm(tier) {
+    const input = document.getElementById(`tier-rpm-${tier}`);
+    if (!input) return;
+    const raw = input.value.trim();
+    const payload = { [tier]: raw === '' ? null : raw };
+    await this.api('PUT', '/tier-rpm', payload);
+    this.toast(`RPM ${tier} ${I18n.t('toast.saved') || 'saved'}`, 'success');
+    this.loadTierRpm();
   },
 
   async testLoginProxy() {
