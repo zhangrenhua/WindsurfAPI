@@ -739,19 +739,30 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
     const url = new URL(req.url, 'http://localhost');
     const filter = (url.searchParams.get('status') || 'all').toLowerCase();
     const now = Date.now();
+    // Health-based filter buckets. Collapses the previous 7-way filter
+    // (status × rateLimited × modelRateLimits × expired) into the three
+    // states an operator actually wants to triage by:
+    //   healthy = status:active AND no rate-limit AND no model-lock
+    //             AND errorCount=0 AND planEnd in the future
+    //   warn    = status:active but at least one soft issue
+    //             (rateLimited / modelRateLimits / errorCount>0)
+    //   failed  = status:error|disabled|banned OR planEnd already past
+    const isExpired = (a) => {
+      const planEnd = a.credits?.planEnd ? Date.parse(a.credits.planEnd) : NaN;
+      return Number.isFinite(planEnd) && planEnd <= now;
+    };
+    const hasSoftIssue = (a) => !!a.rateLimited
+      || (a.modelRateLimits && Object.keys(a.modelRateLimits).length > 0)
+      || (a.errorCount > 0);
     const matchesFilter = (a) => {
       switch (filter) {
         case 'all': return true;
-        case 'active': case 'error': case 'disabled': case 'banned':
-          return a.status === filter;
-        case 'rate_limited':
-          return !!a.rateLimited;
-        case 'model_rate_limited':
-          return a.modelRateLimits && Object.keys(a.modelRateLimits).length > 0;
-        case 'expired': {
-          const planEnd = a.credits?.planEnd ? Date.parse(a.credits.planEnd) : NaN;
-          return Number.isFinite(planEnd) && planEnd <= now;
-        }
+        case 'healthy':
+          return a.status === 'active' && !hasSoftIssue(a) && !isExpired(a);
+        case 'warn':
+          return a.status === 'active' && !isExpired(a) && hasSoftIssue(a);
+        case 'failed':
+          return a.status !== 'active' || isExpired(a);
         default: return true;
       }
     };

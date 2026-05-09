@@ -1899,13 +1899,9 @@ window._firebaseOAuth = async function(provider) {
             状态筛选
             <select id="accounts-status-filter" class="input" style="height:28px;padding:2px 8px;min-width:200px" onchange="App.changeAccountsStatusFilter(this.value)">
               <option value="all">全部</option>
-              <option value="active">正常 (active)</option>
-              <option value="error">错误 (error)</option>
-              <option value="disabled">手动停用 (disabled)</option>
-              <option value="banned">已封禁 (banned)</option>
-              <option value="rate_limited">账号级限流</option>
-              <option value="model_rate_limited">模型级限流</option>
-              <option value="expired">已过期 (planEnd 过期)</option>
+              <option value="healthy">🟢 健康 (可用)</option>
+              <option value="warn">🟡 异常 (有限制但活着)</option>
+              <option value="failed">🔴 失效 (不可用)</option>
             </select>
           </label>
           <span class="text-sm text-muted" id="accounts-filter-summary"></span>
