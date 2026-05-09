@@ -1682,6 +1682,10 @@ window._firebaseOAuth = async function(provider) {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 5h18"/><path d="M3 12h18"/><path d="M3 19h18"/></svg>
               <span data-i18n="action.batchImport">批量导入并登录</span>
             </button>
+            <button class="btn btn-outline" onclick="App.windsurfLoginBatchAsync()" id="wl-batch-async-btn" title="后台异步执行，避免长时间挂起；可关闭面板，任务在后台继续">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span>async</span>
+            </button>
           </div>
         </div>
       </div>
@@ -3402,6 +3406,102 @@ docker compose up -d --force-recreate</pre>
       btn.disabled = false;
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 5h18"/><path d="M3 12h18"/><path d="M3 19h18"/></svg> ' + I18n.t('action.batchImport');
     }
+  },
+
+  async windsurfLoginBatchAsync() {
+    const input = document.getElementById('wl-batch-input').value;
+    if (!input.trim()) return this.toast(I18n.t('batch.pasteFirst'), 'error');
+
+    const autoAdd = document.getElementById('wl-auto-add').checked;
+    const btn = document.getElementById('wl-batch-async-btn');
+    const syncBtn = document.getElementById('wl-batch-btn');
+    btn.disabled = true;
+    if (syncBtn) syncBtn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 启动中…';
+
+    let jobId = null;
+    try {
+      const start = await this.api('POST', '/batch-import/async', { text: input, autoAdd });
+      if (!start.success || !start.jobId) {
+        const errKey = start.error ? `error.${start.error}` : null;
+        const msg = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (start.error || I18n.t('error.unknown'));
+        this.toast(msg, 'error');
+        return;
+      }
+      jobId = start.jobId;
+    } catch (err) {
+      this.toast(err.message, 'error');
+      btn.disabled = false;
+      if (syncBtn) syncBtn.disabled = false;
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> <span>async</span>';
+      return;
+    }
+
+    const renderProgress = (j) => {
+      const pct = j.total > 0 ? Math.round((j.processed / j.total) * 100) : 0;
+      this.showWindsurfLoginResult(`
+        <div class="section-header">
+          <div>
+            <div class="section-title">异步批量导入 <span class="text-sm text-muted">job ${jobId.slice(0, 8)}</span></div>
+            <div class="section-desc">${j.processed}/${j.total} 已处理 · 成功 ${j.successCount} · 失败 ${j.failCount} · ${j.status}</div>
+          </div>
+        </div>
+        <div class="section-body">
+          <div style="height:8px;background:var(--surface-2);border-radius:999px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:var(--success, #10b981);transition:width .3s"></div>
+          </div>
+        </div>`);
+    };
+
+    const finalize = (j) => {
+      if (Array.isArray(j.results) && j.results.length) {
+        this.renderBatchWindsurfLoginResult(j.results, autoAdd);
+        this.pushLoginHistoryEntries(j.results.map(item => ({
+          time: new Date().toISOString(),
+          email: item.email,
+          proxy: this.getWindsurfProxyLabel(item.proxy),
+          status: item.success ? 'success' : `error: ${item.error || 'unknown'}`,
+          apiKey: item.success ? (item.apiKey_masked || (item.apiKey ? item.apiKey.slice(0, 16) + '...' : undefined)) : undefined,
+        })));
+      }
+      const tone = (j.failCount || 0) ? 'info' : 'success';
+      this.toast(I18n.t('batch.importComplete', { success: j.successCount || 0, fail: j.failCount || 0 }), tone);
+      if ((j.successCount || 0) > 0) {
+        this.loadAccounts();
+        document.getElementById('wl-batch-input').value = '';
+      }
+    };
+
+    const poll = async () => {
+      try {
+        const j = await this.api('GET', `/batch-import/async/${jobId}`);
+        if (!j || !j.id) {
+          this.toast('任务丢失，请刷新查看账号列表', 'error');
+          return true;
+        }
+        renderProgress(j);
+        if (j.status === 'done' || j.status === 'error') {
+          if (j.status === 'error') this.toast(`后台任务出错：${j.error || 'unknown'}`, 'error');
+          finalize(j);
+          return true;
+        }
+        return false;
+      } catch (err) {
+        this.toast(`轮询失败：${err.message}`, 'error');
+        return true;
+      }
+    };
+
+    await poll();
+    const timer = setInterval(async () => {
+      const stop = await poll();
+      if (stop) {
+        clearInterval(timer);
+        btn.disabled = false;
+        if (syncBtn) syncBtn.disabled = false;
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> <span>async</span>';
+      }
+    }, 2000);
   },
 
   renderLoginHistory() {

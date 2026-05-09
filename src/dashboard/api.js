@@ -6,6 +6,7 @@
 import { config, log } from '../config.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
   getAccountList, getAccountCount, addAccountByKey, addAccountByToken,
   removeAccount, setAccountStatus, resetAccountErrors, updateAccountLabel,
@@ -85,6 +86,108 @@ export function buildBatchProxyBinding(result, proxy) {
     accountId,
     proxy: parsed,
   };
+}
+
+// Per-line worker shared by sync (/batch-import) and async
+// (/batch-import/async) handlers. Pulled out so the two endpoints can't
+// drift in behaviour. Always resolves — never throws — so a single bad
+// line doesn't abort the whole batch.
+async function processBatchImportLine(line, autoAdd) {
+  const parts = line.split(/\s+/);
+  let proxy = null, email, password;
+  if (parts.length >= 3 && (parts[0].includes('://') || parts[0].includes(':'))) {
+    proxy = parts[0];
+    email = parts[1];
+    password = parts[2];
+  } else if (parts.length >= 2) {
+    email = parts[0];
+    password = parts[1];
+  } else {
+    return { success: false, email: line.slice(0, 30), error: 'ERR_FORMAT_INVALID' };
+  }
+  try {
+    const loginProxy = proxy ? parseProxyUrl(proxy) : getProxyConfig().global;
+    const result = await processWindsurfLogin({ email, password, loginProxy, autoAdd });
+    const binding = buildBatchProxyBinding(result, proxy);
+    if (binding) {
+      setAccountProxy(binding.accountId, binding.proxy);
+      result.proxy = proxy;
+      ensureLsForAccount(binding.accountId).catch(() => {});
+    }
+    return result;
+  } catch (err) {
+    return { success: false, email, error: err.message };
+  }
+}
+
+// In-memory store for /batch-import/async jobs. Keyed by jobId. Finished
+// jobs older than BATCH_JOB_TTL_MS are pruned on every read so the map
+// can't grow unbounded across long-running processes.
+const _batchJobs = new Map();
+const BATCH_JOB_TTL_MS = 60 * 60 * 1000;
+
+function pruneBatchJobs() {
+  const now = Date.now();
+  for (const [id, job] of _batchJobs) {
+    if (job.finishedAt && now - job.finishedAt > BATCH_JOB_TTL_MS) {
+      _batchJobs.delete(id);
+    }
+  }
+}
+
+function snapshotBatchJob(job) {
+  return {
+    id: job.id,
+    status: job.status,
+    total: job.total,
+    processed: job.results.length,
+    successCount: job.successCount,
+    failCount: job.failCount,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    error: job.error,
+    results: job.results,
+  };
+}
+
+function startBatchImportJob(text, autoAdd) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const jobId = randomUUID();
+  const job = {
+    id: jobId,
+    status: 'running',
+    total: lines.length,
+    successCount: 0,
+    failCount: 0,
+    results: [],
+    startedAt: Date.now(),
+    finishedAt: null,
+    error: null,
+  };
+  _batchJobs.set(jobId, job);
+  pruneBatchJobs();
+
+  // Fire-and-forget. Errors inside the loop are caught per-line by
+  // processBatchImportLine; the outer catch only fires on unexpected
+  // failures (e.g. the helper itself throws synchronously).
+  (async () => {
+    for (const line of lines) {
+      const result = await processBatchImportLine(line, autoAdd);
+      job.results.push(result);
+      if (result.success) job.successCount++;
+      else job.failCount++;
+    }
+    job.status = 'done';
+    job.finishedAt = Date.now();
+  })().catch(err => {
+    job.status = 'error';
+    job.error = err?.message || String(err);
+    job.finishedAt = Date.now();
+    log.warn(`batch-import async job ${jobId} crashed: ${job.error}`);
+  });
+
+  return job;
 }
 
 function json(res, status, body) {
@@ -1237,6 +1340,8 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
 
   // ─── Batch proxy + account import ─────────────────────
   // POST /batch-import — each line: "proxy email password" or "email password"
+  // Synchronous: holds the HTTP connection until every line is processed.
+  // For large batches (>20 lines) prefer /batch-import/async below.
   if (subpath === '/batch-import' && method === 'POST') {
     try {
       const { text, autoAdd = true } = body || {};
@@ -1246,38 +1351,60 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
 
       const results = [];
       for (const line of lines) {
-        const parts = line.split(/\s+/);
-        let proxy = null, email, password;
-        if (parts.length >= 3 && (parts[0].includes('://') || parts[0].includes(':'))) {
-          proxy = parts[0];
-          email = parts[1];
-          password = parts[2];
-        } else if (parts.length >= 2) {
-          email = parts[0];
-          password = parts[1];
-        } else {
-          results.push({ success: false, email: line.slice(0, 30), error: 'ERR_FORMAT_INVALID' });
-          continue;
-        }
-        try {
-          const loginProxy = proxy ? parseProxyUrl(proxy) : getProxyConfig().global;
-          const result = await processWindsurfLogin({ email, password, loginProxy, autoAdd });
-          const binding = buildBatchProxyBinding(result, proxy);
-          if (binding) {
-              setAccountProxy(binding.accountId, binding.proxy);
-              result.proxy = proxy;
-              ensureLsForAccount(binding.accountId).catch(() => {});
-          }
-          results.push(result);
-        } catch (err) {
-          results.push({ success: false, email, error: err.message });
-        }
+        results.push(await processBatchImportLine(line, autoAdd));
       }
       const successCount = results.filter(r => r.success).length;
       return json(res, 200, { success: true, total: results.length, successCount, failCount: results.length - successCount, results });
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
+  }
+
+  // ─── Batch import (async) ─────────────────────────────
+  // POST   /batch-import/async             → start job, returns {jobId, total}
+  // GET    /batch-import/async             → list recent jobs
+  // GET    /batch-import/async/:jobId      → poll job status + results so far
+  // DELETE /batch-import/async/:jobId      → drop a finished job from memory
+  if (subpath === '/batch-import/async' && method === 'POST') {
+    try {
+      const { text, autoAdd = true } = body || {};
+      if (!text || typeof text !== 'string') return json(res, 400, { error: 'ERR_TEXT_REQUIRED' });
+      const job = startBatchImportJob(text, autoAdd);
+      if (!job) return json(res, 400, { error: 'ERR_NO_VALID_LINES' });
+      return json(res, 202, { success: true, jobId: job.id, total: job.total });
+    } catch (err) {
+      return json(res, 400, { error: err.message });
+    }
+  }
+  if (subpath === '/batch-import/async' && method === 'GET') {
+    pruneBatchJobs();
+    const jobs = [..._batchJobs.values()]
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .map(j => ({
+        id: j.id,
+        status: j.status,
+        total: j.total,
+        processed: j.results.length,
+        successCount: j.successCount,
+        failCount: j.failCount,
+        startedAt: j.startedAt,
+        finishedAt: j.finishedAt,
+      }));
+    return json(res, 200, { jobs });
+  }
+  const batchJobMatch = subpath.match(/^\/batch-import\/async\/([0-9a-fA-F-]+)$/);
+  if (batchJobMatch && method === 'GET') {
+    pruneBatchJobs();
+    const job = _batchJobs.get(batchJobMatch[1]);
+    if (!job) return json(res, 404, { error: 'ERR_JOB_NOT_FOUND' });
+    return json(res, 200, snapshotBatchJob(job));
+  }
+  if (batchJobMatch && method === 'DELETE') {
+    const job = _batchJobs.get(batchJobMatch[1]);
+    if (!job) return json(res, 404, { error: 'ERR_JOB_NOT_FOUND' });
+    if (job.status === 'running') return json(res, 409, { error: 'ERR_JOB_RUNNING' });
+    _batchJobs.delete(job.id);
+    return json(res, 200, { success: true });
   }
 
   // ─── OAuth login (Google / GitHub via Firebase) ────────
