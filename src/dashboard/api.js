@@ -19,6 +19,7 @@ import {
   getTierRpmDefaults,
   resetAllAccounts,
   clearBannedAccounts,
+  clearExpiredAccounts,
 } from '../auth.js';
 import { restartLsForProxy } from '../langserver.js';
 import { getLsStatus, stopLanguageServer, startLanguageServer, isLanguageServerRunning } from '../langserver.js';
@@ -891,6 +892,14 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
   // back to active and drop the persisted ban metadata.
   if (subpath === '/accounts/clear-banned' && method === 'POST') {
     const r = clearBannedAccounts();
+    return json(res, 200, { success: true, ...r });
+  }
+
+  // POST /accounts/clear-expired — delete accounts whose credits.planEnd
+  // is already in the past. Trial / paid plans alike rely on planEnd as
+  // the authoritative end-of-life signal.
+  if (subpath === '/accounts/clear-expired' && method === 'POST') {
+    const r = clearExpiredAccounts();
     return json(res, 200, { success: true, ...r });
   }
 

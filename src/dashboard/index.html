@@ -503,6 +503,27 @@ tbody tr:hover td { background: var(--surface-2); }
   font-style: italic;
 }
 
+/* Accounts table is column-heavy (id / label / tier / rpm / credits /
+   models / status / error / lastUsed / key / action) — apply a
+   compact override so it fits typical 14"-15" laptop widths without
+   horizontal scroll. Other tables keep the default spacious look. */
+#accounts-table { font-size: 12px; }
+#accounts-table thead th { padding: 7px 8px; font-size: 10px; }
+#accounts-table tbody td { padding: 6px 8px; }
+#accounts-table .badge { font-size: 10px; padding: 2px 6px; line-height: 1.4; }
+#accounts-table button.btn-xs,
+#accounts-table button.btn-sm { padding: 2px 6px; font-size: 11px; }
+#accounts-table .text-xs { font-size: 10px; }
+#accounts-table code { font-size: 11px; }
+/* Long email / key / model labels truncate with ellipsis instead of
+   pushing the whole row wide. Hover the cell to read the full value. */
+#accounts-table td.cell-truncate {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ─── Account detail panel (expand-in-row) ──────────── */
 .expand-chevron {
   display: inline-flex;
@@ -1799,9 +1820,13 @@ window._firebaseOAuth = async function(provider) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
           <span>一键全部恢复</span>
         </button>
-        <button class="btn btn-outline" onclick="App.clearBannedAccounts()" title="只处理 status=banned 或检测到封禁信号的账号，把它们恢复成 active 并清掉封禁记录">
+        <button class="btn btn-outline" onclick="App.clearBannedAccounts()" title="永久删除已被识别为封号的账号（status=banned 或带 bannedAt/bannedReason）。仅有部分封禁信号但未达阈值的账号不会被删除，只清空其信号计数。">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M15 3l6 6"/><path d="M21 3l-6 6"/><path d="M5 12a7 7 0 1 0 14 0 7 7 0 0 0-14 0z"/></svg>
           <span>清理封禁</span>
+        </button>
+        <button class="btn btn-outline" onclick="App.clearExpiredAccounts()" title="删除已过期账号（credits.planEnd 早于当前时间）。未探测过 credits 或没有 planEnd 字段的账号不会被处理。">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          <span>清理过期账号</span>
         </button>
       </div>
     </div>
@@ -4235,15 +4260,47 @@ docker compose up -d --force-recreate</pre>
 
   async clearBannedAccounts() {
     const ok = await this.confirm(
-      '清理封禁',
-      '只把 status=banned 或检测到封禁信号的账号恢复成 active，并清掉 bannedAt / bannedReason / 封禁信号计数。\n\n继续吗？',
-      { okText: '清理', cancelText: '取消' },
+      '清理封禁（不可恢复）',
+      '将永久删除每个已被识别为封号的账号（status=banned 或带 bannedAt/bannedReason）。\n\n• 仅有部分封号信号但还没达成阈值的账号不会被删除，只清空它们的信号计数\n• 此操作不可撤销，被删账号需要重新导入\n\n继续吗？',
+      { danger: true, okText: '删除', cancelText: '取消' },
     );
     if (!ok) return;
     try {
       const r = await this.api('POST', '/accounts/clear-banned', {});
       if (r.success) {
-        this.toast(r.cleared ? `已清理 ${r.cleared} 个封禁账号` : '没有需要清理的封禁账号', r.cleared ? 'success' : 'info');
+        const parts = [];
+        if (r.deleted) {
+          const sample = (r.removed || []).slice(0, 3).map(x => x.email).join(', ');
+          const more = r.removed && r.removed.length > 3 ? ` …+${r.removed.length - 3}` : '';
+          parts.push(`已删除 ${r.deleted} 个封禁账号（${sample}${more}）`);
+        }
+        if (r.cleared) parts.push(`清空 ${r.cleared} 个账号的部分封禁信号`);
+        if (!parts.length) parts.push('没有需要处理的封禁账号');
+        this.toast(parts.join(' · '), (r.deleted || r.cleared) ? 'success' : 'info');
+        this.loadAccounts();
+      } else {
+        this.toast(this.translateError(r.error, 'error.unknown'), 'error');
+      }
+    } catch (e) { this.toast(e.message, 'error'); }
+  },
+
+  async clearExpiredAccounts() {
+    const ok = await this.confirm(
+      '清理过期账号（不可恢复）',
+      '将永久删除每个 planEnd 已经早于当前时间的账号（Trial 试用期满 / 订阅结束）。\n\n• 未探测过 credits 或没有 planEnd 字段的账号不会被处理\n• 此操作不可撤销，被删账号需要重新导入\n\n继续吗？',
+      { danger: true, okText: '删除', cancelText: '取消' },
+    );
+    if (!ok) return;
+    try {
+      const r = await this.api('POST', '/accounts/clear-expired', {});
+      if (r.success) {
+        if (r.deleted) {
+          const sample = (r.removed || []).slice(0, 3).map(x => x.email).join(', ');
+          const more = r.removed && r.removed.length > 3 ? ` …+${r.removed.length - 3}` : '';
+          this.toast(`已删除 ${r.deleted} 个过期账号（${sample}${more}）`, 'success');
+        } else {
+          this.toast('没有过期账号', 'info');
+        }
         this.loadAccounts();
       } else {
         this.toast(this.translateError(r.error, 'error.unknown'), 'error');

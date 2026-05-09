@@ -616,36 +616,78 @@ export function resetAllAccounts({ force = false } = {}) {
 }
 
 /**
- * Clear banned/ban-signal state across the pool only — leaves untouched
- * accounts that are healthy or merely rate-limited. Targets:
- *   - status === 'banned'
- *   - any persisted bannedAt / bannedReason
- *   - lingering _banSignalCount / _banSignalAt streak
- * Anything that was banned gets revived to 'active'.
+ * Delete every account whose plan period has ended. We treat the
+ * `credits.planEnd` ISO timestamp as authoritative — once `now`
+ * passes it, the account can no longer be billed/served upstream and
+ * weekly resets won't bring it back. Accounts without a known planEnd
+ * (never probed / planEnd missing on this plan shape) are left alone
+ * so unprobed rows don't get nuked by accident. Returns
+ * `{ total, deleted, removed: [{id,email,planEnd}] }`.
+ */
+export function clearExpiredAccounts() {
+  const now = Date.now();
+  const removed = [];
+  // Walk in reverse so splice inside removeAccount doesn't skip rows.
+  for (let i = accounts.length - 1; i >= 0; i--) {
+    const a = accounts[i];
+    const c = a?.credits;
+    const planEnd = c && typeof c.planEnd === 'string' ? Date.parse(c.planEnd) : NaN;
+    if (!Number.isFinite(planEnd)) continue;
+    if (planEnd > now) continue;
+    removed.push({ id: a.id, email: a.email, planEnd: c.planEnd });
+    removeAccount(a.id);
+  }
+  if (removed.length) {
+    log.info(`Removed ${removed.length} expired accounts: ${removed.map(r => `${r.email}(${r.planEnd})`).join(', ')}`);
+  }
+  return { total: accounts.length + removed.length, deleted: removed.length, removed };
+}
+
+/**
+ * Permanently delete every account that has been auto-banned. We
+ * remove anything where `status === 'banned'` OR a persisted
+ * bannedAt/bannedReason exists — those accounts have already failed
+ * the upstream ban-signal heuristic twice and the operator has
+ * decided they're not worth keeping in the pool. Lingering ban-signal
+ * streak (count<2) does NOT trigger deletion: those accounts are
+ * still healthy enough to recover, so we just clear the streak so
+ * the next single signal doesn't tip them over by surprise.
+ * Returns `{ total, deleted, removed: [{id,email,bannedReason}], cleared }`.
  */
 export function clearBannedAccounts() {
+  const removed = [];
   let cleared = 0;
-  for (const a of accounts) {
-    const wasBanned = a.status === 'banned'
-      || a.bannedAt
-      || a.bannedReason
-      || a._banSignalCount
-      || a._banSignalAt
-      || a._banSignalLastMessage;
-    if (!wasBanned) continue;
-    if (a.status === 'banned') a.status = 'active';
-    delete a.bannedAt;
-    delete a.bannedReason;
-    a._banSignalCount = 0;
-    a._banSignalAt = 0;
-    delete a._banSignalLastMessage;
-    cleared++;
+  // Walk in reverse so removeAccount's splice doesn't skip rows.
+  for (let i = accounts.length - 1; i >= 0; i--) {
+    const a = accounts[i];
+    const isBanned = a.status === 'banned' || a.bannedAt || a.bannedReason;
+    if (isBanned) {
+      removed.push({ id: a.id, email: a.email, bannedReason: a.bannedReason || null });
+      removeAccount(a.id);
+      continue;
+    }
+    // Not banned but has a partial ban-signal streak — wipe it so the
+    // next single transient signal doesn't escalate unfairly.
+    if (a._banSignalCount || a._banSignalAt || a._banSignalLastMessage) {
+      a._banSignalCount = 0;
+      a._banSignalAt = 0;
+      delete a._banSignalLastMessage;
+      cleared++;
+    }
+  }
+  if (cleared > 0) saveAccounts();
+  if (removed.length) {
+    log.info(`Deleted ${removed.length} banned accounts: ${removed.map(r => r.email).join(', ')}`);
   }
   if (cleared > 0) {
-    saveAccounts();
-    log.info(`Cleared banned/ban-signal state for ${cleared} accounts`);
+    log.info(`Cleared ban-signal streak on ${cleared} accounts (count<2, kept active)`);
   }
-  return { total: accounts.length, cleared };
+  return {
+    total: accounts.length + removed.length,
+    deleted: removed.length,
+    cleared,
+    removed,
+  };
 }
 
 /**
