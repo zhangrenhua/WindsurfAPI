@@ -11,16 +11,7 @@ import { isSocks, createSocksTunnel } from '../socks.js';
 const FIREBASE_API_KEY = 'AIzaSyDsOl-1XpT5err0Tcnx8FFod1H8gVGIycY';
 const FIREBASE_REFRESH_URL = `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`;
 const CODEIUM_REGISTER_URL = 'https://api.codeium.com/register_user/';
-const AUTH1_CONNECTIONS_URL = 'https://windsurf.com/_devin-auth/connections';
 const AUTH1_PASSWORD_LOGIN_URL = 'https://windsurf.com/_devin-auth/password/login';
-// 2026-04-26: Windsurf moved the primary email-method probe to a Connect-RPC
-// path under `_backend/...SeatManagementService/CheckUserLoginMethod`. The
-// response is fast and clean (`{userExists,hasPassword}`); the old
-// `/_devin-auth/connections` path is still wired in their bundle but
-// runs on Vercel functions that 504 every few seconds. We use the new
-// endpoint as the primary probe and fall back to the old one only if
-// the new one is unreachable.
-const WINDSURF_CHECK_LOGIN_METHOD_URL = 'https://windsurf.com/_backend/exa.seat_management_pb.SeatManagementService/CheckUserLoginMethod';
 const WINDSURF_SEAT_SERVICE_BASE = 'https://server.self-serve.windsurf.com/exa.seat_management_pb.SeatManagementService';
 const WINDSURF_POST_AUTH_URL = `${WINDSURF_SEAT_SERVICE_BASE}/WindsurfPostAuth`;
 const WINDSURF_ONE_TIME_TOKEN_URL = `${WINDSURF_SEAT_SERVICE_BASE}/GetOneTimeAuthToken`;
@@ -342,83 +333,6 @@ async function httpsRequestRetrying(url, opts, postData, proxy, label = 'request
   throw lastErr || new Error(`${label} failed after retries`);
 }
 
-// Windsurf 在 2026-04-26 把 /_devin-auth/connections 的响应从
-//   { auth_method: { method: 'auth1', has_password: bool } }
-// 换成
-//   { connections: [{ id, type, enabled, client_id }, ...] }
-// 其中 type:'email' + enabled:true = 该账号支持邮箱密码登录。
-// 这个函数兼容新旧两种形态，返回统一的 { method, hasPassword, raw }。
-function interpretConnections(data) {
-  if (data && Array.isArray(data.connections)) {
-    const email = data.connections.find(c => c && c.type === 'email');
-    return {
-      method: 'auth1',
-      hasPassword: !!(email && email.enabled),
-      raw: data,
-    };
-  }
-  if (data && data.auth_method) {
-    return {
-      method: data.auth_method.method || null,
-      hasPassword: data.auth_method.has_password !== false,
-      raw: data,
-    };
-  }
-  return { method: null, hasPassword: false, raw: data || {} };
-}
-
-async function fetchAuth1Connections(email, fingerprint, proxy) {
-  const body = JSON.stringify({ product: 'windsurf', email });
-  const headers = buildJsonHeaders(fingerprint, body);
-  const res = await httpsRequestRetrying(
-    AUTH1_CONNECTIONS_URL, { method: 'POST', headers }, body, proxy, 'Auth1 connections'
-  );
-  return res.data || {};
-}
-
-// New primary email-method probe (Windsurf 2026-04-26 migration).
-// Returns the same { method, hasPassword, raw } shape as
-// interpretConnections so call sites are uniform. On reachability failure
-// returns null (caller falls back to /_devin-auth/connections).
-async function fetchCheckUserLoginMethod(email, fingerprint, proxy) {
-  const body = JSON.stringify({ email });
-  const headers = buildJsonHeaders(fingerprint, body, { 'Connect-Protocol-Version': '1' });
-  try {
-    const res = await httpsRequest(
-      WINDSURF_CHECK_LOGIN_METHOD_URL, { method: 'POST', headers }, body, proxy
-    );
-    if (res.status !== 200 || !res.data || typeof res.data !== 'object') {
-      log.warn(`CheckUserLoginMethod non-200 (${res.status}): ${JSON.stringify(res.data || '').slice(0, 120)}`);
-      return null;
-    }
-    // Empirically (2026-04-29) the Vercel function will sometimes serve
-    // an empty `{}` for valid emails — likely a cache miss / cold-start
-    // edge or geo-routing fallback. Treating `userExists`/`hasPassword`
-    // as false in that case wrongly funnels every account into the
-    // "no password set" branch and aborts before any login attempt.
-    // When neither field is present, defer to the legacy connections
-    // endpoint instead of guessing.
-    const hasUserField = Object.prototype.hasOwnProperty.call(res.data, 'userExists');
-    const hasPwField = Object.prototype.hasOwnProperty.call(res.data, 'hasPassword');
-    if (!hasUserField && !hasPwField) {
-      log.warn(`CheckUserLoginMethod empty body for ${email}, falling back to /_devin-auth/connections`);
-      return null;
-    }
-    if (res.data.userExists === false) {
-      // Caller maps this to "user not found" via interpretConnections{method:null}.
-      return { method: null, hasPassword: false, raw: res.data };
-    }
-    return {
-      method: 'auth1',
-      hasPassword: !!res.data.hasPassword,
-      raw: res.data,
-    };
-  } catch (e) {
-    log.warn(`CheckUserLoginMethod unreachable: ${e.message}`);
-    return null;
-  }
-}
-
 async function registerWithCodeium(token, fingerprint, proxy) {
   // v2.0.57 (Fix 1): try register.windsurf.com first, fall back to
   // api.codeium.com. Both go through our fingerprint+proxy-aware
@@ -601,44 +515,23 @@ export async function windsurfLogin(email, password, proxy = null) {
   const fingerprint = generateFingerprint();
   log.info(`Windsurf login: ${email} fp=${fingerprint['User-Agent'].slice(0, 40)}... proxy=${proxy?.host || 'none'}`);
 
-  // Probe sequence (per Windsurf 2026-04-26 half-migration):
-  //   1. CheckUserLoginMethod (new Connect-RPC, fast + clean shape)
-  //   2. _devin-auth/connections (old path, slow/flaky but still wired)
-  // The probe is informational only — used to surface a clear error for
-  // non-existent emails or OAuth-only accounts. Login itself always goes
-  // through Auth1; the Firebase signInWithPassword route was retired
-  // 2026-05-04 (Firebase started rejecting server-side callers with
-  // "Firebase App Check token is invalid", which we can't satisfy).
-  let conn = await fetchCheckUserLoginMethod(email, fingerprint, proxy);
-  if (!conn || conn.method === null) {
-    let auth1Connections = null;
-    try {
-      auth1Connections = await fetchAuth1Connections(email, fingerprint, proxy);
-    } catch (err) {
-      log.warn(`Auth1 connections probe failed for ${email}: ${err.message}`);
-    }
-    conn = interpretConnections(auth1Connections);
-  }
-
-  // Email definitively not found upstream → fail fast with a friendly
-  // error instead of burning a credential attempt on a bogus address.
-  if (conn.method === null) {
-    const err = createFriendlyAuthError('Auth1', 'EMAIL_NOT_FOUND');
-    recordEmailFailure(email, 'not_found');
-    throw err;
-  }
-
-  // OAuth-only (Google / GitHub) account — `password` won't work.
-  if (conn.hasPassword === false) {
-    const err = createFriendlyAuthError('Auth1', 'No password set. Please log in with Google or GitHub.');
-    recordEmailFailure(email, 'no_password');
-    throw err;
-  }
-
-  // Method is `auth1`, `firebase`, or unknown — all funnel to Auth1.
-  // Even legacy `firebase` accounts authenticate through the same
-  // `/_devin-auth/password/login` → PostAuth chain now; the dedicated
-  // Firebase signInWithPassword endpoint is no longer usable.
+  // Probe sequence used to gate login on non-existent / OAuth-only
+  // emails, but the probe (CheckUserLoginMethod and the legacy
+  // /_devin-auth/connections shape) is unreliable — it returns
+  // `hasPassword:false` for accounts that genuinely have a password
+  // (cache lag right after a password change, partial Vercel function
+  // responses, edge-routed cold starts). Trusting it blocks valid
+  // logins. Now we always attempt Auth1 and let the real
+  // /_devin-auth/password/login endpoint be the source of truth — it
+  // returns the same `No password set` / `EMAIL_NOT_FOUND` error codes
+  // when those conditions actually hold, and createFriendlyAuthError
+  // maps them back to the user-facing OAuth-or-Auth-Token hint.
+  //
+  // Firebase signInWithPassword is no longer attempted under any
+  // condition: it requires App Check tokens that server-side callers
+  // can't produce (post-2026-05-04). Auth1 covers every existing
+  // account whether it was originally provisioned via auth1 or
+  // legacy firebase.
   try {
     const result = await windsurfLoginViaAuth1(email, password, fingerprint, proxy);
     recordEmailSuccess(email);
