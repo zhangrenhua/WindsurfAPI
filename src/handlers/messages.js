@@ -11,12 +11,30 @@
  * No buffering, so first-token latency matches the upstream Cascade stream.
  */
 
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomUUID, randomBytes } from 'crypto';
 import { handleChatCompletions } from './chat.js';
 import { log } from '../config.js';
 
 function genMsgId() {
   return 'msg_' + randomUUID().replace(/-/g, '').slice(0, 24);
+}
+
+// Anthropic's native thinking blocks ship with a server-side `signature`
+// field that the SDK echoes back when it round-trips the assistant's
+// reasoning into the next request. Cascade upstream doesn't mint one, so
+// we stamp a stable-shaped placeholder ("msg_" + 304 alphanumerics =
+// 308 total) on every thinking block we emit. Any client that simply
+// forwards the field gets a non-empty value; clients that cryptographically
+// verify signatures aren't supported regardless of what we put here.
+const _SIG_ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const _SIG_PREFIX = 'msg_';
+const _SIG_TOTAL_LEN = 308;
+const _SIG_BODY_LEN = _SIG_TOTAL_LEN - _SIG_PREFIX.length;
+function genThinkingSignature() {
+  const bytes = randomBytes(_SIG_BODY_LEN);
+  let out = _SIG_PREFIX;
+  for (let i = 0; i < _SIG_BODY_LEN; i++) out += _SIG_ALPHA[bytes[i] % 62];
+  return out;
 }
 
 // Anthropic Messages API tool types whose execution lives on Anthropic's
@@ -292,7 +310,7 @@ export function openAIToAnthropic(result, model, msgId) {
   const usage = result.usage || {};
   const content = [];
   if (choice?.message?.reasoning_content) {
-    content.push({ type: 'thinking', thinking: choice.message.reasoning_content });
+    content.push({ type: 'thinking', thinking: choice.message.reasoning_content, signature: genThinkingSignature() });
   }
   if (choice?.message?.tool_calls?.length) {
     if (choice.message.content) content.push({ type: 'text', text: choice.message.content });
@@ -425,6 +443,18 @@ class AnthropicStreamTranslator {
 
   closeCurrentBlock() {
     if (!this.current) return;
+    // Anthropic delivers the thinking-block signature as a final delta
+    // before content_block_stop. The SDK accumulates it onto the block
+    // along with the text deltas; missing it makes the SDK reject the
+    // round-tripped thinking turn on the next request. Cascade upstream
+    // doesn't mint signatures for us, so we stamp a placeholder.
+    if (this.current.type === 'thinking') {
+      this.send('content_block_delta', {
+        type: 'content_block_delta',
+        index: this.current.index,
+        delta: { type: 'signature_delta', signature: genThinkingSignature() },
+      });
+    }
     this.send('content_block_stop', { type: 'content_block_stop', index: this.current.index });
     this.blockIndex++;
     this.current = null;
