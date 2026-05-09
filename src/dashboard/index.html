@@ -1894,6 +1894,22 @@ window._firebaseOAuth = async function(provider) {
         </div>
       </div>
       <div class="section-body tight">
+        <div style="padding:8px 12px;display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--border);flex-wrap:wrap">
+          <label class="text-sm" style="display:inline-flex;align-items:center;gap:6px">
+            状态筛选
+            <select id="accounts-status-filter" class="input" style="height:28px;padding:2px 8px;min-width:200px" onchange="App.changeAccountsStatusFilter(this.value)">
+              <option value="all">全部</option>
+              <option value="active">正常 (active)</option>
+              <option value="error">错误 (error)</option>
+              <option value="disabled">手动停用 (disabled)</option>
+              <option value="banned">已封禁 (banned)</option>
+              <option value="rate_limited">账号级限流</option>
+              <option value="model_rate_limited">模型级限流</option>
+              <option value="expired">已过期 (planEnd 过期)</option>
+            </select>
+          </label>
+          <span class="text-sm text-muted" id="accounts-filter-summary"></span>
+        </div>
         <div class="table-wrap">
           <table id="accounts-table">
             <thead><tr><th data-i18n="table.header.id">ID</th><th data-i18n="table.header.label">标签</th><th data-i18n="table.header.tier">层级</th><th data-i18n="table.header.rpm">RPM</th><th class="th-help" data-i18n="table.header.credits" data-i18n-title="creditsBar.columnTooltip" title="配额使用情况&#10;&#10;日 — 每日高级请求剩余百分比（重置频繁）&#10;周 — 每周高级请求剩余百分比（Trial 账号重点看这条）&#10;&#10;数值越高 = 剩余越多 = 越安全&#10;悬停单条进度条可查看重置时间">余额</th><th data-i18n="table.header.models">可用模型</th><th data-i18n="table.header.status">状态</th><th data-i18n="table.header.error">错误</th><th data-i18n="table.header.lastUsed">最后使用</th><th data-i18n="table.header.key">Key</th><th data-i18n="table.header.action">操作</th></tr></thead>
@@ -2596,6 +2612,7 @@ const App = {
   _filterTimer: null,
   accountsPage: parseInt(localStorage.getItem('accounts_page') || '1', 10) || 1,
   accountsPageSize: parseInt(localStorage.getItem('accounts_page_size') || '20', 10) || 20,
+  accountsStatusFilter: localStorage.getItem('accounts_status_filter') || 'all',
   accountsTotalPages: 1,
   accountsTotal: 0,
 
@@ -3804,8 +3821,9 @@ docker compose up -d --force-recreate</pre>
     this.loadDrought();
     const page = Math.max(1, this.accountsPage || 1);
     const pageSize = Math.max(1, this.accountsPageSize || 20);
+    const status = this.accountsStatusFilter || 'all';
     const [d, ov] = await Promise.all([
-      this.api('GET', `/accounts?page=${page}&pageSize=${pageSize}`),
+      this.api('GET', `/accounts?page=${page}&pageSize=${pageSize}&status=${encodeURIComponent(status)}`),
       this.api('GET', '/overview').catch(() => null),
     ]);
     this.accountsTotal = Number.isFinite(d?.total) ? d.total : (d?.accounts?.length || 0);
@@ -4009,7 +4027,10 @@ docker compose up -d --force-recreate</pre>
     const prev = document.getElementById('accounts-prev-btn');
     const next = document.getElementById('accounts-next-btn');
     const sel = document.getElementById('accounts-page-size');
+    const statusSel = document.getElementById('accounts-status-filter');
+    const filterSummary = document.getElementById('accounts-filter-summary');
     if (sel && String(sel.value) !== String(this.accountsPageSize)) sel.value = String(this.accountsPageSize);
+    if (statusSel && statusSel.value !== this.accountsStatusFilter) statusSel.value = this.accountsStatusFilter;
     const total = this.accountsTotal || 0;
     const totalPages = this.accountsTotalPages || 1;
     const page = Math.min(Math.max(1, this.accountsPage || 1), totalPages);
@@ -4022,9 +4043,26 @@ docker compose up -d --force-recreate</pre>
         summary.textContent = `第 ${start}-${end} / 共 ${total} 个`;
       }
     }
+    if (filterSummary) {
+      if (this.accountsStatusFilter && this.accountsStatusFilter !== 'all') {
+        filterSummary.textContent = `已筛选: ${total} 个匹配`;
+      } else {
+        filterSummary.textContent = '';
+      }
+    }
     if (indicator) indicator.textContent = `${page} / ${totalPages}`;
     if (prev) prev.disabled = page <= 1;
     if (next) next.disabled = page >= totalPages;
+  },
+
+  changeAccountsStatusFilter(value) {
+    const v = String(value || 'all');
+    if (v === this.accountsStatusFilter) return;
+    this.accountsStatusFilter = v;
+    this.accountsPage = 1;
+    localStorage.setItem('accounts_status_filter', v);
+    localStorage.setItem('accounts_page', '1');
+    this.loadAccounts();
   },
 
   goAccountsPage(p) {

@@ -733,11 +733,31 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
   // query string the response shape stays `{accounts:[…all…]}` for
   // anything that still consumes the unpaginated list. When either is
   // set we slice and surface `{accounts, total, page, pageSize, totalPages}`.
+  // `?status=X` filter is independent — applies before pagination so
+  // pageCount reflects the filtered set the user sees.
   if (subpath === '/accounts' && method === 'GET') {
     const url = new URL(req.url, 'http://localhost');
-    const all = getAccountList();
+    const filter = (url.searchParams.get('status') || 'all').toLowerCase();
+    const now = Date.now();
+    const matchesFilter = (a) => {
+      switch (filter) {
+        case 'all': return true;
+        case 'active': case 'error': case 'disabled': case 'banned':
+          return a.status === filter;
+        case 'rate_limited':
+          return !!a.rateLimited;
+        case 'model_rate_limited':
+          return a.modelRateLimits && Object.keys(a.modelRateLimits).length > 0;
+        case 'expired': {
+          const planEnd = a.credits?.planEnd ? Date.parse(a.credits.planEnd) : NaN;
+          return Number.isFinite(planEnd) && planEnd <= now;
+        }
+        default: return true;
+      }
+    };
+    const all = getAccountList().filter(matchesFilter);
     const hasPaging = url.searchParams.has('page') || url.searchParams.has('pageSize');
-    if (!hasPaging) return json(res, 200, { accounts: all });
+    if (!hasPaging) return json(res, 200, { accounts: all, total: all.length, status: filter });
     const pageSize = Math.max(1, Math.min(500, parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
     const totalPages = Math.max(1, Math.ceil(all.length / pageSize));
     const page = Math.max(1, Math.min(totalPages, parseInt(url.searchParams.get('page') || '1', 10) || 1));
@@ -748,6 +768,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
       page,
       pageSize,
       totalPages,
+      status: filter,
     });
   }
 
