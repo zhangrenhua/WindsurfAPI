@@ -46,9 +46,16 @@ const VERSION_INFO = (() => {
   return { version: VERSION, commit, commitMessage, commitDate, branch };
 })();
 
-// 10 MB is way above any realistic chat-completions payload while still
-// bounding worst-case memory from a malicious/broken client.
-const MAX_BODY_SIZE = 10 * 1024 * 1024;
+// Cap inbound request body so a malicious/broken client can't pin
+// memory by streaming an unbounded body. Default 32 MB covers Claude
+// Code conversations carrying large tool_result blocks and base64
+// inline images; overrideable via WINDSURFAPI_MAX_BODY_MB for callers
+// that legitimately need bigger (or smaller for tighter hosting).
+const MAX_BODY_SIZE = (() => {
+  const mb = parseInt(process.env.WINDSURFAPI_MAX_BODY_MB || '', 10);
+  const safe = Number.isFinite(mb) && mb > 0 ? mb : 32;
+  return safe * 1024 * 1024;
+})();
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
