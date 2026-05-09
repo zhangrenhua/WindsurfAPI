@@ -105,6 +105,24 @@ async function processBatchImportLine(line, autoAdd) {
   } else {
     return { success: false, email: line.slice(0, 30), error: 'ERR_FORMAT_INVALID' };
   }
+  // Skip when the email already exists in the pool. Only meaningful when
+  // the caller asked us to add the account (autoAdd:true); with
+  // autoAdd:false the caller wants the key returned regardless of pool
+  // state, so we fall through and re-login.
+  if (autoAdd) {
+    const target = email.toLowerCase();
+    const existing = getAccountList().find(a => (a.email || '').toLowerCase() === target);
+    if (existing) {
+      return {
+        success: true,
+        skipped: true,
+        email,
+        account: { id: existing.id, email: existing.email, status: existing.status },
+        proxy: proxy || undefined,
+        error: 'ERR_ALREADY_EXISTS',
+      };
+    }
+  }
   try {
     const loginProxy = proxy ? parseProxyUrl(proxy) : getProxyConfig().global;
     const result = await processWindsurfLogin({ email, password, loginProxy, autoAdd });
@@ -143,6 +161,7 @@ function snapshotBatchJob(job) {
     processed: job.results.length,
     successCount: job.successCount,
     failCount: job.failCount,
+    skipCount: job.skipCount,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     error: job.error,
@@ -160,6 +179,7 @@ function startBatchImportJob(text, autoAdd) {
     total: lines.length,
     successCount: 0,
     failCount: 0,
+    skipCount: 0,
     results: [],
     startedAt: Date.now(),
     finishedAt: null,
@@ -175,7 +195,8 @@ function startBatchImportJob(text, autoAdd) {
     for (const line of lines) {
       const result = await processBatchImportLine(line, autoAdd);
       job.results.push(result);
-      if (result.success) job.successCount++;
+      if (result.skipped) job.skipCount++;
+      else if (result.success) job.successCount++;
       else job.failCount++;
     }
     job.status = 'done';
@@ -1353,8 +1374,10 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
       for (const line of lines) {
         results.push(await processBatchImportLine(line, autoAdd));
       }
-      const successCount = results.filter(r => r.success).length;
-      return json(res, 200, { success: true, total: results.length, successCount, failCount: results.length - successCount, results });
+      const skipCount = results.filter(r => r.skipped).length;
+      const successCount = results.filter(r => r.success && !r.skipped).length;
+      const failCount = results.length - successCount - skipCount;
+      return json(res, 200, { success: true, total: results.length, successCount, failCount, skipCount, results });
     } catch (err) {
       return json(res, 400, { error: err.message });
     }
@@ -1387,6 +1410,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
         processed: j.results.length,
         successCount: j.successCount,
         failCount: j.failCount,
+        skipCount: j.skipCount,
         startedAt: j.startedAt,
         finishedAt: j.finishedAt,
       }));

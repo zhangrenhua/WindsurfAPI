@@ -9,7 +9,6 @@ import { log } from '../config.js';
 import { isSocks, createSocksTunnel } from '../socks.js';
 
 const FIREBASE_API_KEY = 'AIzaSyDsOl-1XpT5err0Tcnx8FFod1H8gVGIycY';
-const FIREBASE_AUTH_URL = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`;
 const FIREBASE_REFRESH_URL = `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`;
 const CODEIUM_REGISTER_URL = 'https://api.codeium.com/register_user/';
 const AUTH1_CONNECTIONS_URL = 'https://windsurf.com/_devin-auth/connections';
@@ -523,39 +522,6 @@ async function windsurfLoginViaAuth1(email, password, fingerprint, proxy) {
   };
 }
 
-async function windsurfLoginViaFirebase(email, password, fingerprint, proxy) {
-  const firebaseBody = JSON.stringify({
-    email,
-    password,
-    returnSecureToken: true,
-  });
-
-  const fbHeaders = buildJsonHeaders(fingerprint, firebaseBody);
-  const fbRes = await httpsRequest(FIREBASE_AUTH_URL, { method: 'POST', headers: fbHeaders }, firebaseBody, proxy);
-
-  if (fbRes.data.error) {
-    const msg = fbRes.data.error.message || 'Unknown Firebase error';
-    throw createFriendlyAuthError('Firebase', msg, msg);
-  }
-
-  const idToken = fbRes.data.idToken;
-  if (!idToken) throw new Error('ERR_FIREBASE_TOKEN_MISSING');
-
-  log.info(`Firebase login OK: ${email}, UID=${fbRes.data.localId}`);
-
-  const reg = await registerWithCodeium(idToken, fingerprint, proxy);
-  log.info(`Codeium register OK: ${email} → key=${reg.api_key.slice(0, 20)}...`);
-
-  return {
-    apiKey: reg.api_key,
-    name: reg.name || email,
-    email,
-    idToken,
-    refreshToken: fbRes.data.refreshToken || '',
-    apiServerUrl: reg.api_server_url || '',
-  };
-}
-
 /**
  * Full Windsurf login:
  *  - Auth1 password login → bridge session → one-time auth token → Codeium register
@@ -638,7 +604,11 @@ export async function windsurfLogin(email, password, proxy = null) {
   // Probe sequence (per Windsurf 2026-04-26 half-migration):
   //   1. CheckUserLoginMethod (new Connect-RPC, fast + clean shape)
   //   2. _devin-auth/connections (old path, slow/flaky but still wired)
-  //   3. fall through to Firebase legacy path
+  // The probe is informational only — used to surface a clear error for
+  // non-existent emails or OAuth-only accounts. Login itself always goes
+  // through Auth1; the Firebase signInWithPassword route was retired
+  // 2026-05-04 (Firebase started rejecting server-side callers with
+  // "Firebase App Check token is invalid", which we can't satisfy).
   let conn = await fetchCheckUserLoginMethod(email, fingerprint, proxy);
   if (!conn || conn.method === null) {
     let auth1Connections = null;
@@ -647,55 +617,39 @@ export async function windsurfLogin(email, password, proxy = null) {
     } catch (err) {
       log.warn(`Auth1 connections probe failed for ${email}: ${err.message}`);
     }
-    // interpretConnections handles BOTH the old `{auth_method:{...}}`
-    // and the post-2026-04-26 `{connections:[...]}` shape — Windsurf is
-    // currently serving both depending on which CDN edge you hit.
     conn = interpretConnections(auth1Connections);
   }
 
-  if (conn.method === 'auth1') {
-    if (!conn.hasPassword) {
-      const err = createFriendlyAuthError('Auth1', 'No password set. Please log in with Google or GitHub.');
-      recordEmailFailure(email, 'no_password');
-      throw err;
-    }
-    try {
-      const result = await windsurfLoginViaAuth1(email, password, fingerprint, proxy);
-      recordEmailSuccess(email);
-      return result;
-    } catch (e) {
-      // Auth-shaped failures count toward the lockout. Network / 5xx
-      // upstream errors don't (those aren't the operator's fault).
-      if (e?.isAuthFail || /ERR_LOGIN_FAILED|ERR_AUTH1|EMAIL|PASSWORD/i.test(e?.message || '')) {
-        recordEmailFailure(email, e?.message);
-      }
-      throw e;
-    }
+  // Email definitively not found upstream → fail fast with a friendly
+  // error instead of burning a credential attempt on a bogus address.
+  if (conn.method === null) {
+    const err = createFriendlyAuthError('Auth1', 'EMAIL_NOT_FOUND');
+    recordEmailFailure(email, 'not_found');
+    throw err;
   }
 
+  // OAuth-only (Google / GitHub) account — `password` won't work.
+  if (conn.hasPassword === false) {
+    const err = createFriendlyAuthError('Auth1', 'No password set. Please log in with Google or GitHub.');
+    recordEmailFailure(email, 'no_password');
+    throw err;
+  }
+
+  // Method is `auth1`, `firebase`, or unknown — all funnel to Auth1.
+  // Even legacy `firebase` accounts authenticate through the same
+  // `/_devin-auth/password/login` → PostAuth chain now; the dedicated
+  // Firebase signInWithPassword endpoint is no longer usable.
   try {
-    const result = await windsurfLoginViaFirebase(email, password, fingerprint, proxy);
+    const result = await windsurfLoginViaAuth1(email, password, fingerprint, proxy);
     recordEmailSuccess(email);
     return result;
-  } catch (firebaseErr) {
-    if (!firebaseErr?.isAuthFail) {
-      // Network / Firebase 5xx — don't count, just bubble up.
-      throw firebaseErr;
+  } catch (e) {
+    // Auth-shaped failures count toward the per-email lockout. Network
+    // / 5xx upstream errors don't (those aren't the operator's fault).
+    if (e?.isAuthFail || /ERR_LOGIN_FAILED|ERR_AUTH1|EMAIL|PASSWORD/i.test(e?.message || '')) {
+      recordEmailFailure(email, e?.message);
     }
-
-    try {
-      const result = await windsurfLoginViaAuth1(email, password, fingerprint, proxy);
-      recordEmailSuccess(email);
-      return result;
-    } catch (auth1Err) {
-      if (auth1Err?.isAuthFail) {
-        // Both paths confirmed the credential is wrong — count as one
-        // failure (not two) so 3 distinct attempts truly = ban.
-        recordEmailFailure(email, firebaseErr?.message || auth1Err?.message);
-        throw firebaseErr;
-      }
-      throw auth1Err;
-    }
+    throw e;
   }
 }
 
