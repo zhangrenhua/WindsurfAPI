@@ -695,25 +695,15 @@ export async function handleMessages(body, context = {}) {
     return { status: 200, body: openAIToAnthropic(result.body, requestedModel, msgId) };
   }
 
-  // Streaming path — ask handleChatCompletions for its streaming handler and
-  // point its writes at our translator shim. This lets the upstream Cascade
-  // poll loop drive the downstream SSE in real time — no buffer-then-replay.
-  const streamResult = await chatHandler({ ...openaiBody, stream: true, __route: 'messages' }, effectiveContext);
-
-  if (!streamResult.stream) {
-    // The OpenAI path returned a non-stream error (e.g. 403 model_not_entitled)
-    return {
-      status: streamResult.status || 502,
-      body: {
-        type: 'error',
-        error: {
-          type: streamResult.body?.error?.type || 'api_error',
-          message: streamResult.body?.error?.message || 'Upstream error',
-        },
-      },
-    };
-  }
-
+  // Streaming path — return immediately with status 200 + SSE headers
+  // and defer the slow upstream work to handler(). server.js flushes the
+  // headers before invoking handler(), so the moment a client (or nginx
+  // reverse proxy) reads our response it sees the status line right
+  // away. We follow up with a `: connecting` SSE comment to consume the
+  // first byte of the body. Without this dance, nginx's default 60s
+  // proxy_read_timeout fires while we're still awaiting Cascade in
+  // chatHandler — see "upstream timed out while reading response
+  // header" reports.
   return {
     status: 200,
     stream: true,
@@ -724,12 +714,47 @@ export async function handleMessages(body, context = {}) {
       'X-Accel-Buffering': 'no',
     },
     async handler(realRes) {
+      // Force header flush + first body byte so reverse proxies enter
+      // body-read mode immediately. The comment is silently dropped by
+      // SSE clients per the spec.
+      try { realRes.write(': connecting\n\n'); } catch {}
+
+      const sendStreamError = (type, message) => {
+        if (realRes.writableEnded) return;
+        try {
+          realRes.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`);
+        } catch {}
+      };
+
+      let streamResult;
+      try {
+        streamResult = await chatHandler({ ...openaiBody, stream: true, __route: 'messages' }, effectiveContext);
+      } catch (e) {
+        log.error(`Messages stream chatHandler error: ${e.message}`);
+        sendStreamError('api_error', e.message);
+        if (!realRes.writableEnded) realRes.end();
+        return;
+      }
+
+      if (!streamResult.stream) {
+        // chatHandler decided not to stream (e.g. 403 model_not_entitled).
+        // We already committed to status 200 SSE on the wire, so surface
+        // the error as an in-stream Anthropic `error` event instead of a
+        // dangling response.
+        const errType = streamResult.body?.error?.type || 'api_error';
+        const errMsg = streamResult.body?.error?.message || 'Upstream error';
+        sendStreamError(errType, errMsg);
+        if (!realRes.writableEnded) realRes.end();
+        return;
+      }
+
       const translator = new AnthropicStreamTranslator(realRes, msgId, requestedModel);
       const captureRes = createCaptureRes(translator, realRes);
 
       // Forward client disconnect so the upstream cascade is cancelled.
-      // We don't call captureRes.end() here — that would set writableEnded=true
-      // and suppress the abort path inside chat.js's stream handler.
+      // We don't call captureRes.end() here — that would set
+      // writableEnded=true and suppress the abort path inside chat.js's
+      // stream handler.
       realRes.on('close', () => {
         if (!captureRes.writableEnded) captureRes._clientDisconnected();
       });
