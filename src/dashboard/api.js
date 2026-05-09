@@ -17,6 +17,8 @@ import {
   checkLockout, failedAuthAttempt, successfulAuthAttempt,
   getDroughtSummary,
   getTierRpmDefaults,
+  resetAllAccounts,
+  clearBannedAccounts,
 } from '../auth.js';
 import { restartLsForProxy } from '../langserver.js';
 import { getLsStatus, stopLanguageServer, startLanguageServer, isLanguageServerRunning } from '../langserver.js';
@@ -870,6 +872,22 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
       }
     }
     return json(res, 200, { success: true, results });
+  }
+
+  // POST /accounts/reset-all — wipe transient health state across all
+  // accounts. Optional body { force: true } also resurrects manually-
+  // disabled rows; default leaves status='disabled' alone.
+  if (subpath === '/accounts/reset-all' && method === 'POST') {
+    const force = !!(body && body.force);
+    const r = resetAllAccounts({ force });
+    return json(res, 200, { success: true, ...r, force });
+  }
+
+  // POST /accounts/clear-banned — only flip banned / ban-signal accounts
+  // back to active and drop the persisted ban metadata.
+  if (subpath === '/accounts/clear-banned' && method === 'POST') {
+    const r = clearBannedAccounts();
+    return json(res, 200, { success: true, ...r });
   }
 
   // POST /accounts/:id/probe — manually trigger capability probe

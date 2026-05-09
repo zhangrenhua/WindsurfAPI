@@ -566,6 +566,88 @@ export function resetAccountErrors(id) {
   return true;
 }
 
+// Wipe every transient health/limit signal off `account` so the next
+// pickAccountForCall sees a clean slate. `force` (default false) keeps
+// status='disabled' alone — operator-disabled accounts shouldn't get
+// auto-re-enabled by a "reset all" sweep — but force=true overrides
+// that and resurrects everything except expired-tier rows.
+function clearAccountHealthState(account, { force = false } = {}) {
+  let changed = false;
+  if (account.status !== 'active' && (force || account.status !== 'disabled')) {
+    account.status = 'active';
+    changed = true;
+  }
+  if (account.errorCount) { account.errorCount = 0; changed = true; }
+  if (account.internalErrorStreak) { account.internalErrorStreak = 0; changed = true; }
+  if (account.rateLimitedUntil) { account.rateLimitedUntil = 0; changed = true; }
+  if (account._modelRateLimits && Object.keys(account._modelRateLimits).length) {
+    account._modelRateLimits = {};
+    changed = true;
+  }
+  if (account._banSignalCount || account._banSignalAt || account._banSignalLastMessage) {
+    account._banSignalCount = 0;
+    account._banSignalAt = 0;
+    delete account._banSignalLastMessage;
+    changed = true;
+  }
+  if (account.bannedAt || account.bannedReason) {
+    delete account.bannedAt;
+    delete account.bannedReason;
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Reset every account's transient health state in one shot. Honours
+ * operator-disabled accounts unless `force:true` is passed. Returns
+ * `{ total, reset }` so callers can show a "X of Y restored" toast.
+ */
+export function resetAllAccounts({ force = false } = {}) {
+  let reset = 0;
+  for (const a of accounts) {
+    if (clearAccountHealthState(a, { force })) reset++;
+  }
+  if (reset > 0) {
+    saveAccounts();
+    log.info(`Reset ${reset}/${accounts.length} accounts to active`);
+  }
+  return { total: accounts.length, reset };
+}
+
+/**
+ * Clear banned/ban-signal state across the pool only — leaves untouched
+ * accounts that are healthy or merely rate-limited. Targets:
+ *   - status === 'banned'
+ *   - any persisted bannedAt / bannedReason
+ *   - lingering _banSignalCount / _banSignalAt streak
+ * Anything that was banned gets revived to 'active'.
+ */
+export function clearBannedAccounts() {
+  let cleared = 0;
+  for (const a of accounts) {
+    const wasBanned = a.status === 'banned'
+      || a.bannedAt
+      || a.bannedReason
+      || a._banSignalCount
+      || a._banSignalAt
+      || a._banSignalLastMessage;
+    if (!wasBanned) continue;
+    if (a.status === 'banned') a.status = 'active';
+    delete a.bannedAt;
+    delete a.bannedReason;
+    a._banSignalCount = 0;
+    a._banSignalAt = 0;
+    delete a._banSignalLastMessage;
+    cleared++;
+  }
+  if (cleared > 0) {
+    saveAccounts();
+    log.info(`Cleared banned/ban-signal state for ${cleared} accounts`);
+  }
+  return { total: accounts.length, cleared };
+}
+
 /**
  * Update account label.
  */

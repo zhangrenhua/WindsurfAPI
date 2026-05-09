@@ -1795,6 +1795,14 @@ window._firebaseOAuth = async function(provider) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <span data-i18n="action.probe">全部探测</span>
         </button>
+        <button class="btn btn-outline" onclick="App.resetAllAccounts()" title="清空所有账号的 errorCount / rateLimitedUntil / _modelRateLimits / 封禁信号，并把 status 拉回 active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+          <span>一键全部恢复</span>
+        </button>
+        <button class="btn btn-outline" onclick="App.clearBannedAccounts()" title="只处理 status=banned 或检测到封禁信号的账号，把它们恢复成 active 并清掉封禁记录">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M15 3l6 6"/><path d="M21 3l-6 6"/><path d="M5 12a7 7 0 1 0 14 0 7 7 0 0 0-14 0z"/></svg>
+          <span>清理封禁</span>
+        </button>
       </div>
     </div>
     <!-- v2.0.57 Fix 5 — drought mode banner: shown only when every active
@@ -4205,6 +4213,42 @@ docker compose up -d --force-recreate</pre>
         this.toast(this.translateError(r.error, 'error.probeFailed'), 'error');
       }
     } catch (e) { this.toast(I18n.t('error.probeFailed') + ': ' + e.message, 'error'); }
+  },
+
+  async resetAllAccounts() {
+    const ok = await this.confirm(
+      '一键全部恢复',
+      '将所有账号的 status 拉回 active，并清空 errorCount / rateLimitedUntil / 模型限流 / 封禁信号。\n\n手动停用的账号（status=disabled）默认保持不变；如需一并恢复请勾选"包含手动停用"。',
+      { okText: '恢复', cancelText: '取消' },
+    );
+    if (!ok) return;
+    try {
+      const r = await this.api('POST', '/accounts/reset-all', { force: false });
+      if (r.success) {
+        this.toast(`已恢复 ${r.reset} / ${r.total} 个账号`, r.reset ? 'success' : 'info');
+        this.loadAccounts();
+      } else {
+        this.toast(this.translateError(r.error, 'error.unknown'), 'error');
+      }
+    } catch (e) { this.toast(e.message, 'error'); }
+  },
+
+  async clearBannedAccounts() {
+    const ok = await this.confirm(
+      '清理封禁',
+      '只把 status=banned 或检测到封禁信号的账号恢复成 active，并清掉 bannedAt / bannedReason / 封禁信号计数。\n\n继续吗？',
+      { okText: '清理', cancelText: '取消' },
+    );
+    if (!ok) return;
+    try {
+      const r = await this.api('POST', '/accounts/clear-banned', {});
+      if (r.success) {
+        this.toast(r.cleared ? `已清理 ${r.cleared} 个封禁账号` : '没有需要清理的封禁账号', r.cleared ? 'success' : 'info');
+        this.loadAccounts();
+      } else {
+        this.toast(this.translateError(r.error, 'error.unknown'), 'error');
+      }
+    } catch (e) { this.toast(e.message, 'error'); }
   },
 
   async probeAccount(id) {
