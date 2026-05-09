@@ -164,6 +164,10 @@ function pruneBatchJobs() {
     }
   }
 }
+// Background sweep so finished jobs don't linger when the operator
+// never refreshes the batch list / never kicks off another import.
+// .unref() so the timer can't keep the process alive past real work.
+setInterval(pruneBatchJobs, 5 * 60 * 1000).unref?.();
 
 function snapshotBatchJob(job) {
   return {

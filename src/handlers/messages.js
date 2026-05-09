@@ -719,8 +719,22 @@ export async function handleMessages(body, context = {}) {
       // SSE clients per the spec.
       try { realRes.write(': connecting\n\n'); } catch {}
 
+      // Track client disconnect from the very first instant — the
+      // listener has to be in place BEFORE we await chatHandler so we
+      // notice if the client bails during the slow Cascade preflight.
+      // captureRefHolder is mutated once captureRes exists so the same
+      // listener routes the disconnect into chat.js's abort path.
+      let clientGone = false;
+      const captureRefHolder = { ref: null };
+      const onClose = () => {
+        clientGone = true;
+        const cap = captureRefHolder.ref;
+        if (cap && !cap.writableEnded) cap._clientDisconnected();
+      };
+      realRes.on('close', onClose);
+
       const sendStreamError = (type, message) => {
-        if (realRes.writableEnded) return;
+        if (realRes.writableEnded || clientGone) return;
         try {
           realRes.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type, message } })}\n\n`);
         } catch {}
@@ -732,6 +746,11 @@ export async function handleMessages(body, context = {}) {
       } catch (e) {
         log.error(`Messages stream chatHandler error: ${e.message}`);
         sendStreamError('api_error', e.message);
+        if (!realRes.writableEnded) realRes.end();
+        return;
+      }
+
+      if (clientGone) {
         if (!realRes.writableEnded) realRes.end();
         return;
       }
@@ -750,14 +769,11 @@ export async function handleMessages(body, context = {}) {
 
       const translator = new AnthropicStreamTranslator(realRes, msgId, requestedModel);
       const captureRes = createCaptureRes(translator, realRes);
-
-      // Forward client disconnect so the upstream cascade is cancelled.
-      // We don't call captureRes.end() here — that would set
-      // writableEnded=true and suppress the abort path inside chat.js's
-      // stream handler.
-      realRes.on('close', () => {
-        if (!captureRes.writableEnded) captureRes._clientDisconnected();
-      });
+      captureRefHolder.ref = captureRes;
+      // If the client disconnected during the chatHandler await, fire
+      // the abort path against captureRes now so chat.js sees an unended
+      // stream and tears the upstream cascade down.
+      if (clientGone && !captureRes.writableEnded) captureRes._clientDisconnected();
 
       try {
         await streamResult.handler(captureRes);
