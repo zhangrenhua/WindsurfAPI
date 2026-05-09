@@ -1982,6 +1982,15 @@ async function _handleChatCompletionsInner(body, context = {}) {
     const _resultMsg = String(result.body?.error?.message || '');
     if (/context deadline exceeded|context cancellation while reading body|client\.timeout/i.test(_resultMsg)) {
       reuseEntryDead = true;
+      // Upstream model provider timed out reading the response body.
+      // The Cascade error literally calls itself "retryable error
+      // from model provider", so promote it to upstream_transient_error
+      // and let the standard rotate-to-next-account + backoff path
+      // (the `errType === 'upstream_transient_error'` branch below)
+      // pick it up instead of bubbling the first hit to the caller.
+      result.body = result.body || {};
+      result.body.error = result.body.error || {};
+      result.body.error.type = 'upstream_transient_error';
     }
     lastErr = result;
     const errType = result.body?.error?.type;
@@ -3230,6 +3239,15 @@ function streamResponse(id, created, model, modelKey, provider, messages, cascad
             // the earlier conversation context").
             if (/context deadline exceeded|context cancellation while reading body|client\.timeout/i.test(err.message || '')) {
               reuseEntryDead = true;
+              // Upstream model provider read timeout — Cascade flags it
+              // as "retryable", so promote to a transient_stall so
+              // isUpstreamTransientError() returns true, the retry path
+              // engages, and we backoff + try the next account instead
+              // of bubbling immediately. (The matching non-stream path
+              // sets errType='upstream_transient_error' for the same
+              // reason.)
+              err.isModelError = true;
+              err.kind = 'transient_stall';
             }
             const isAuthFail = /unauthenticated|invalid api key|invalid_grant|permission_denied.*account/i.test(err.message);
             const isRateLimit = /rate limit|rate_limit|too many requests|quota/i.test(err.message);
