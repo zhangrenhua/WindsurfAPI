@@ -1867,6 +1867,23 @@ window._firebaseOAuth = async function(provider) {
             <tbody></tbody>
           </table>
         </div>
+        <div id="accounts-pagination" style="display:flex;align-items:center;gap:12px;padding:12px;flex-wrap:wrap;justify-content:flex-end;border-top:1px solid var(--border)">
+          <span class="text-sm text-muted" id="accounts-page-summary"></span>
+          <label class="text-sm" style="display:inline-flex;align-items:center;gap:6px">
+            每页
+            <select id="accounts-page-size" class="input" style="height:30px;padding:2px 8px" onchange="App.changeAccountsPageSize(this.value)">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <div style="display:inline-flex;align-items:center;gap:4px">
+            <button class="btn btn-ghost btn-sm" id="accounts-prev-btn" onclick="App.goAccountsPage(App.accountsPage - 1)">上一页</button>
+            <span class="text-sm" id="accounts-page-indicator">1 / 1</span>
+            <button class="btn btn-ghost btn-sm" id="accounts-next-btn" onclick="App.goAccountsPage(App.accountsPage + 1)">下一页</button>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -2544,6 +2561,10 @@ const App = {
   modelAccessConfig: { mode: 'all', list: [] },
   loginHistory: JSON.parse(localStorage.getItem('wl_history') || '[]'),
   _filterTimer: null,
+  accountsPage: parseInt(localStorage.getItem('accounts_page') || '1', 10) || 1,
+  accountsPageSize: parseInt(localStorage.getItem('accounts_page_size') || '20', 10) || 20,
+  accountsTotalPages: 1,
+  accountsTotal: 0,
 
   applyLang() {
     // Delegate to new I18n system
@@ -3748,10 +3769,16 @@ docker compose up -d --force-recreate</pre>
     // v2.0.57 Fix 5 — refresh drought banner alongside accounts so a low
     // pool state shows up the moment the user opens the panel.
     this.loadDrought();
+    const page = Math.max(1, this.accountsPage || 1);
+    const pageSize = Math.max(1, this.accountsPageSize || 20);
     const [d, ov] = await Promise.all([
-      this.api('GET', '/accounts'),
+      this.api('GET', `/accounts?page=${page}&pageSize=${pageSize}`),
       this.api('GET', '/overview').catch(() => null),
     ]);
+    this.accountsTotal = Number.isFinite(d?.total) ? d.total : (d?.accounts?.length || 0);
+    this.accountsTotalPages = Number.isFinite(d?.totalPages) && d.totalPages > 0 ? d.totalPages : 1;
+    if (Number.isFinite(d?.page) && d.page >= 1) this.accountsPage = d.page;
+    this.renderAccountsPagination();
     const instances = ov?.langServer?.instances || [];
     const poolCard = document.getElementById('ls-pool-card');
     if (poolCard) {
@@ -3941,6 +3968,48 @@ docker compose up -d --force-recreate</pre>
       this._modelsCatalog = {};
     }
     return this._modelsCatalog;
+  },
+
+  renderAccountsPagination() {
+    const summary = document.getElementById('accounts-page-summary');
+    const indicator = document.getElementById('accounts-page-indicator');
+    const prev = document.getElementById('accounts-prev-btn');
+    const next = document.getElementById('accounts-next-btn');
+    const sel = document.getElementById('accounts-page-size');
+    if (sel && String(sel.value) !== String(this.accountsPageSize)) sel.value = String(this.accountsPageSize);
+    const total = this.accountsTotal || 0;
+    const totalPages = this.accountsTotalPages || 1;
+    const page = Math.min(Math.max(1, this.accountsPage || 1), totalPages);
+    if (summary) {
+      if (total === 0) {
+        summary.textContent = '';
+      } else {
+        const start = (page - 1) * this.accountsPageSize + 1;
+        const end = Math.min(page * this.accountsPageSize, total);
+        summary.textContent = `第 ${start}-${end} / 共 ${total} 个`;
+      }
+    }
+    if (indicator) indicator.textContent = `${page} / ${totalPages}`;
+    if (prev) prev.disabled = page <= 1;
+    if (next) next.disabled = page >= totalPages;
+  },
+
+  goAccountsPage(p) {
+    const next = Math.max(1, Math.min(this.accountsTotalPages || 1, parseInt(p, 10) || 1));
+    if (next === this.accountsPage) return;
+    this.accountsPage = next;
+    localStorage.setItem('accounts_page', String(next));
+    this.loadAccounts();
+  },
+
+  changeAccountsPageSize(v) {
+    const size = Math.max(1, Math.min(500, parseInt(v, 10) || 20));
+    if (size === this.accountsPageSize) return;
+    this.accountsPageSize = size;
+    this.accountsPage = 1;
+    localStorage.setItem('accounts_page_size', String(size));
+    localStorage.setItem('accounts_page', '1');
+    this.loadAccounts();
   },
 
   toggleAccountDetail(id) {

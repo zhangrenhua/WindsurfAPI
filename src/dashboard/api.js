@@ -722,8 +722,26 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
   }
 
   // ─── Accounts ─────────────────────────────────────────
+  // Pagination is opt-in: when neither `page` nor `pageSize` is on the
+  // query string the response shape stays `{accounts:[…all…]}` for
+  // anything that still consumes the unpaginated list. When either is
+  // set we slice and surface `{accounts, total, page, pageSize, totalPages}`.
   if (subpath === '/accounts' && method === 'GET') {
-    return json(res, 200, { accounts: getAccountList() });
+    const url = new URL(req.url, 'http://localhost');
+    const all = getAccountList();
+    const hasPaging = url.searchParams.has('page') || url.searchParams.has('pageSize');
+    if (!hasPaging) return json(res, 200, { accounts: all });
+    const pageSize = Math.max(1, Math.min(500, parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
+    const totalPages = Math.max(1, Math.ceil(all.length / pageSize));
+    const page = Math.max(1, Math.min(totalPages, parseInt(url.searchParams.get('page') || '1', 10) || 1));
+    const start = (page - 1) * pageSize;
+    return json(res, 200, {
+      accounts: all.slice(start, start + pageSize),
+      total: all.length,
+      page,
+      pageSize,
+      totalPages,
+    });
   }
 
   if (subpath === '/accounts' && method === 'POST') {
