@@ -37,9 +37,9 @@ function tierRpmEnv(name, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 const TIER_RPM_DEFAULTS = {
-  pro:     tierRpmEnv('WINDSURFAPI_RPM_PRO',     60),
-  free:    tierRpmEnv('WINDSURFAPI_RPM_FREE',    10),
-  unknown: tierRpmEnv('WINDSURFAPI_RPM_UNKNOWN', 20),
+  pro:     tierRpmEnv('WINDSURFAPI_RPM_PRO',     2),
+  free:    tierRpmEnv('WINDSURFAPI_RPM_FREE',    2),
+  unknown: tierRpmEnv('WINDSURFAPI_RPM_UNKNOWN', 2),
   expired: 0,
 };
 let _tierRpmResolver = null;
