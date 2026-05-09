@@ -188,7 +188,13 @@ function snapshotBatchJob(job) {
 async function processBatchImportTokenLine(line, autoAdd) {
   const parts = line.split(/\s+/);
   let proxy = null, token, label = '';
-  if (parts.length >= 2 && (parts[0].includes('://') || parts[0].includes(':'))) {
+  // Disambiguate "<proxy> <token>" vs "<token>" by actually trying the
+  // proxy parser on parts[0]. JWT-shaped Auth Tokens are dot-separated
+  // with no colons or slashes, so they never accidentally parse as a
+  // proxy URL — and any future token format is safe as long as the
+  // first field is unambiguous to parseProxyUrl.
+  const proxyCandidate = parts.length >= 2 ? parseProxyUrl(parts[0]) : null;
+  if (proxyCandidate) {
     proxy = parts[0];
     token = parts[1];
     label = parts.slice(2).join(' ');
