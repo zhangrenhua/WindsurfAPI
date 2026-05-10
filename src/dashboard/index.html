@@ -3874,11 +3874,12 @@ docker compose up -d --force-recreate</pre>
         } else if (us.planName) {
           tierSubline = us.planName.length > 12 ? us.planName.slice(0, 12) + '…' : us.planName;
         }
-        if (us.monthlyPromptCredits > 0) {
-          usTipLines.push(`Prompt: ${us.promptCreditsUsed}/${us.monthlyPromptCredits}`);
+        const usCr = a.credits || null;
+        if (usCr?.prompt?.limit) {
+          usTipLines.push(`Prompt: ${(usCr.prompt.used || 0).toFixed(0)}/${usCr.prompt.limit.toFixed(0)}`);
         }
-        if (us.monthlyFlowCredits > 0) {
-          usTipLines.push(`Flow: ${us.flowCreditsUsed}/${us.monthlyFlowCredits}`);
+        if (usCr?.flex?.limit) {
+          usTipLines.push(`Flex: ${(usCr.flex.used || 0).toFixed(0)}/${usCr.flex.limit.toFixed(0)}`);
         }
         if (us.allowedModels?.length) {
           usTipLines.push(`Allowed cascade models: ${us.allowedModels.length}`);
@@ -3938,7 +3939,6 @@ docker compose up -d --force-recreate</pre>
           if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
           return String(n);
         };
-        const us2 = a.userStatus || null;
         const fmtReset = (unix) => unix ? new Date(unix * 1000).toLocaleString() : I18n.t('creditsBar.noResetTime');
 
         // Trial countdown — based on credits.planEnd. Trial accounts get
@@ -3972,8 +3972,8 @@ docker compose up -d --force-recreate</pre>
             <span><span style="color:${c};font-weight:600">${usK(remaining)}</span><span style="color:var(--text-dim)"> / ${usK(limit)}</span></span>
           </div>`;
         };
-        const promptRow = us2 ? balanceLine('Prompt', us2.promptCreditsUsed, us2.monthlyPromptCredits, 'Prompt credits:') : '';
-        const flowRow   = us2 ? balanceLine('Flow',   us2.flowCreditsUsed,   us2.monthlyFlowCredits,   'Flow credits:')   : '';
+        const promptRow = cr.prompt?.limit ? balanceLine('Prompt', cr.prompt.used, cr.prompt.limit, 'Prompt credits:') : '';
+        const flexRow   = cr.flex?.limit  ? balanceLine('Flex',   cr.flex.used,   cr.flex.limit,   'Flex credits:')   : '';
 
         // Daily / Weekly premium-quota line. Hidden on Trial accounts
         // because chat usage doesn't decrement these counters there —
@@ -4026,7 +4026,7 @@ docker compose up -d --force-recreate</pre>
 
         creditCell = `<div style="min-width:130px;max-width:200px">
             <div class="text-xs" style="margin-bottom:2px"><b>${this.esc(planName.slice(0, 12))}</b>${trialChip} <span style="color:var(--text-dim)">${fetchedAgo}</span></div>
-            ${promptRow}${flowRow}
+            ${promptRow}${flexRow}
             ${dwLine}
             ${lockLine}
           </div>`;

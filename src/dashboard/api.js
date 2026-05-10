@@ -773,15 +773,12 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
     // with ?sort=raw to get insertion order back.
     const sort = (url.searchParams.get('sort') || 'balance_desc').toLowerCase();
     const balanceKey = (a) => {
-      const us = a?.userStatus;
-      if (us && typeof us.monthlyPromptCredits === 'number' && us.monthlyPromptCredits > 0) {
-        const used = typeof us.promptCreditsUsed === 'number' ? us.promptCreditsUsed : 0;
-        return us.monthlyPromptCredits - used;
+      const cr = a?.credits;
+      if (cr?.prompt?.limit && cr.prompt.limit > 0) {
+        const used = typeof cr.prompt.used === 'number' ? cr.prompt.used : 0;
+        return cr.prompt.limit - used;
       }
-      const w = a?.credits?.weeklyPercent;
-      // Scale percent so it doesn't dominate over absolute counts on
-      // mixed pools (Trial + Pro). 100% ≈ 100k pseudo-credits — plenty
-      // ahead of unprobed (-1) but below most real Pro headroom.
+      const w = cr?.weeklyPercent;
       if (typeof w === 'number') return w * 1000;
       return -1;
     };
