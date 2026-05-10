@@ -768,7 +768,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
     };
     // Default ordering: highest remaining credit balance first so the
     // operator's first page is the rows with most headroom. Falls
-    // through to weeklyPercent for accounts whose userStatus probe
+    // through to weeklyPercent for accounts whose credits
     // never landed, then unprobed rows sink to the bottom. Override
     // with ?sort=raw to get insertion order back.
     const sort = (url.searchParams.get('sort') || 'balance_desc').toLowerCase();

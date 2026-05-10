@@ -3861,36 +3861,33 @@ docker compose up -d --force-recreate</pre>
     const tierLabel = { pro: 'PRO', free: 'FREE', expired: I18n.t('tier.expiredLabel'), unknown: I18n.t('tier.unknown') };
     tbody.innerHTML = (d.accounts || []).map(a => {
       const tier = a.tier || 'unknown';
-      // GetUserStatus snapshot — authoritative plan/trial/credit info (may be null)
-      const us = a.userStatus || null;
-      const usTipLines = [];
+      const cr0 = a.credits || null;
+      const tipLines = [];
       let tierSubline = '';
-      if (us) {
-        if (us.planName) usTipLines.push(`Plan: ${us.planName}`);
-        if (us.trialEndMs) {
-          const daysLeft = Math.max(0, Math.ceil((us.trialEndMs - Date.now()) / 86400000));
-          usTipLines.push(`Trial ends: ${new Date(us.trialEndMs).toLocaleDateString()} (${daysLeft}d left)`);
+      if (cr0) {
+        if (cr0.planName) tipLines.push(`Plan: ${cr0.planName}`);
+        const isTrial0 = /trial/i.test(cr0.planName || '');
+        const planEndMs0 = cr0.planEnd ? Date.parse(cr0.planEnd) : NaN;
+        if (isTrial0 && Number.isFinite(planEndMs0)) {
+          const daysLeft = Math.max(0, Math.ceil((planEndMs0 - Date.now()) / 86400000));
+          tipLines.push(`Trial ends: ${new Date(planEndMs0).toLocaleDateString()} (${daysLeft}d left)`);
           tierSubline = `${daysLeft}d trial`;
-        } else if (us.planName) {
-          tierSubline = us.planName.length > 12 ? us.planName.slice(0, 12) + '…' : us.planName;
+        } else if (cr0.planName) {
+          tierSubline = cr0.planName.length > 12 ? cr0.planName.slice(0, 12) + '…' : cr0.planName;
         }
-        const usCr = a.credits || null;
-        if (usCr?.prompt?.limit) {
-          usTipLines.push(`Prompt: ${(usCr.prompt.used || 0).toFixed(0)}/${usCr.prompt.limit.toFixed(0)}`);
+        if (cr0.prompt?.limit) {
+          tipLines.push(`Prompt: ${(cr0.prompt.used || 0).toFixed(0)}/${cr0.prompt.limit.toFixed(0)}`);
         }
-        if (usCr?.flex?.limit) {
-          usTipLines.push(`Flex: ${(usCr.flex.used || 0).toFixed(0)}/${usCr.flex.limit.toFixed(0)}`);
+        if (cr0.flex?.limit) {
+          tipLines.push(`Flex: ${(cr0.flex.used || 0).toFixed(0)}/${cr0.flex.limit.toFixed(0)}`);
         }
-        if (us.allowedModels?.length) {
-          usTipLines.push(`Allowed cascade models: ${us.allowedModels.length}`);
-        }
-        if (a.userStatusLastFetched) {
-          const ago = Math.round((Date.now() - a.userStatusLastFetched) / 60000);
-          usTipLines.push(`Fetched: ${ago}m ago`);
+        if (cr0.fetchedAt) {
+          const ago = Math.round((Date.now() - cr0.fetchedAt) / 60000);
+          tipLines.push(`Fetched: ${ago}m ago`);
         }
       }
-      const tierTooltip = usTipLines.length
-        ? usTipLines.join('\n')
+      const tierTooltip = tipLines.length
+        ? tipLines.join('\n')
         : I18n.t('status.clickToEditTier');
 
       // Compact summary: avail/total + 编辑 button. Clicking opens modal.
@@ -4160,7 +4157,6 @@ docker compose up -d --force-recreate</pre>
 
   renderAccountDetail(a) {
     const cr = a.credits || {};
-    const us = a.userStatus || {};
     const catalog = this._modelsCatalog || {};
     const T = (k, v) => I18n.t('account.detail.' + k, v);
     const barColor = (v) => v == null ? 'var(--text-dim)' : v <= 10 ? 'var(--error)' : v <= 30 ? 'var(--warn, #f59e0b)' : 'var(--success, #10b981)';
@@ -4236,7 +4232,10 @@ docker compose up -d --force-recreate</pre>
 
     // Plan dates
     let trialDaysLeft = null;
-    if (us.trialEndMs) trialDaysLeft = Math.max(0, Math.ceil((us.trialEndMs - Date.now()) / 86400000));
+    const detailPlanEnd = cr.planEnd ? Date.parse(cr.planEnd) : NaN;
+    if (/trial/i.test(cr.planName || '') && Number.isFinite(detailPlanEnd)) {
+      trialDaysLeft = Math.max(0, Math.ceil((detailPlanEnd - Date.now()) / 86400000));
+    }
 
     return `
     <div class="account-detail-wrap">
@@ -4244,10 +4243,10 @@ docker compose up -d --force-recreate</pre>
         <div class="detail-card">
           <div class="detail-card-head"><span class="dot"></span>${T('plan.title')}</div>
           <div class="detail-kv">
-            <span class="k">${T('plan.name')}</span><span class="v"><b>${this.esc(cr.planName || us.planName || '—')}</b></span>
+            <span class="k">${T('plan.name')}</span><span class="v"><b>${this.esc(cr.planName || '—')}</b></span>
             <span class="k">${T('plan.tier')}</span><span class="v"><span class="tier ${this.esc(a.tier || 'unknown')}" style="padding:1px 8px;font-size:10px">${this.esc(a.tier || 'unknown')}</span>${a.tierManual ? ' <span style="color:var(--text-dim);font-size:10px">✎ manual</span>' : ''}</span>
-            <span class="k">${T('plan.start')}</span><span class="v">${fmtDate(cr.planStart || us.planStart)}</span>
-            <span class="k">${T('plan.end')}</span><span class="v">${fmtDate(cr.planEnd || us.planEnd)}${trialDaysLeft != null ? ` <span style="color:${trialDaysLeft <= 3 ? 'var(--error)' : 'var(--text-dim)'};font-size:11px">(${trialDaysLeft}d left)</span>` : ''}</span>
+            <span class="k">${T('plan.start')}</span><span class="v">${fmtDate(cr.planStart)}</span>
+            <span class="k">${T('plan.end')}</span><span class="v">${fmtDate(cr.planEnd)}${trialDaysLeft != null ? ` <span style="color:${trialDaysLeft <= 3 ? 'var(--error)' : 'var(--text-dim)'};font-size:11px">(${trialDaysLeft}d left)</span>` : ''}</span>
             ${cr.overageBalance != null ? `<span class="k">${T('plan.overage')}</span><span class="v">$${cr.overageBalance.toFixed(4)}</span>` : ''}
           </div>
         </div>
@@ -4285,7 +4284,7 @@ docker compose up -d --force-recreate</pre>
             </div>
             <div class="detail-kv">
               <span class="k">${T('runtime.lastUsed')}</span><span class="v">${fmtAgo(a.lastUsed)}</span>
-              <span class="k">${T('runtime.lastProbed')}</span><span class="v">${fmtAgo(a.lastProbed || a.userStatusLastFetched)}</span>
+              <span class="k">${T('runtime.lastProbed')}</span><span class="v">${fmtAgo(a.lastProbed)}</span>
               <span class="k">${T('runtime.creditsFetched')}</span><span class="v">${fmtAgo(cr.fetchedAt)}</span>
             </div>
             <div class="detail-kv">

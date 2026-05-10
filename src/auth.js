@@ -210,9 +210,6 @@ function _serializeAccounts() {
     credits: a.credits || null,
     blockedModels: a.blockedModels || [],
     refreshToken: a.refreshToken || '',
-    // From GetUserStatus — the authoritative tier/entitlement snapshot.
-    userStatus: a.userStatus || null,
-    userStatusLastFetched: a.userStatusLastFetched || 0,
   }));
 }
 
@@ -325,8 +322,6 @@ function loadAccounts() {
         credits: a.credits || null,
         blockedModels: Array.isArray(a.blockedModels) ? a.blockedModels : [],
         tierManual: !!a.tierManual,
-        userStatus: a.userStatus || null,
-        userStatusLastFetched: a.userStatusLastFetched || 0,
       });
     }
     if (data.length > 0) log.info(`Loaded ${data.length} account(s) from disk`);
@@ -498,46 +493,18 @@ export function setAccountBlockedModels(id, blockedModels) {
  * at selector time even though `account.capabilities` already says yes.
  */
 export function isModelAllowedForAccount(account, modelKey) {
+  const tierModels = getTierModels(account.tier || 'unknown');
+  if (!tierModels.includes(modelKey)) return false;
   const blocked = account.blockedModels || [];
   if (blocked.includes(modelKey)) return false;
-  // tierManual is the operator escape hatch: when set, trust the manual
-  // tier table over GetUserStatus's per-account allowlist. Useful when
-  // probe-based detection misclassified a Pro/Trial account as free
-  // (issue #8) and the operator manually flips it back to Pro.
-  if (!account.tierManual) {
-    // GetUserStatus writes both arms — `user_status` for allowed and
-    // `not_entitled` for denied — into capabilities, keyed by enum.
-    // Either reason means the upstream allowlist has already spoken.
-    const cap = account.capabilities?.[modelKey];
-    if (cap?.reason === 'user_status' || cap?.reason === 'not_entitled') {
-      return cap.ok === true;
-    }
-  }
-  const tierModels = getTierModels(account.tier || 'unknown');
-  return tierModels.includes(modelKey);
+  return true;
 }
 
 /** List of model keys this account is currently allowed to call. */
 export function getAvailableModelsForAccount(account) {
-  const blocked = new Set(account.blockedModels || []);
   const tierModels = getTierModels(account.tier || 'unknown');
-  // Manual tier override or no GetUserStatus yet → tier static table.
-  if (account.tierManual || !account.userStatusLastFetched || !account.capabilities) {
-    return tierModels.filter(m => !blocked.has(m));
-  }
-  // After GetUserStatus: per-account allowlist is authoritative for every
-  // enum-keyed catalog entry; UID-only entries (no enum) fall back to tier.
-  const allowed = [];
-  for (const [key, info] of Object.entries(MODELS)) {
-    if (blocked.has(key)) continue;
-    if (info.enumValue && info.enumValue > 0) {
-      const cap = account.capabilities[key];
-      if (cap?.reason === 'user_status' && cap.ok === true) allowed.push(key);
-    } else if (tierModels.includes(key)) {
-      allowed.push(key);
-    }
-  }
-  return allowed;
+  const blocked = new Set(account.blockedModels || []);
+  return tierModels.filter(m => !blocked.has(m));
 }
 
 /**
@@ -1245,8 +1212,6 @@ export function getAccountList() {
       blockedModels: a.blockedModels || [],
       availableModels: getAvailableModelsForAccount(a),
       tierModels: getTierModels(a.tier || 'unknown'),
-      userStatus: a.userStatus || null,
-      userStatusLastFetched: a.userStatusLastFetched || 0,
     };
   });
 }
@@ -1327,12 +1292,7 @@ export function updateCapability(apiKey, modelKey, ok, reason = '') {
   if (ok && (account.tier === 'free' || account.tier === 'unknown')) {
     registerDiscoveredFreeModel(modelKey);
   }
-  // Only infer tier when we have no authoritative source. GetUserStatus
-  // (userStatusLastFetched) and manual override (tierManual) are both
-  // authoritative; inferTier only looks at canary model capabilities and
-  // would otherwise demote a Pro/Trial account back to 'free' as soon as
-  // a non-premium model (e.g. gemini-2.5-flash, gpt-4o-mini) succeeds.
-  if (!account.tierManual && !account.userStatusLastFetched) {
+  if (!account.tierManual && !account.credits?.planName) {
     account.tier = inferTier(account.capabilities);
   }
   saveAccounts();
@@ -1352,81 +1312,12 @@ function inferTier(caps) {
 }
 
 /**
- * Fetch authoritative user status from the LS → account fields.
- * Returns the parsed UserStatus object on success, null on failure.
+ * Fetch authoritative user status via HTTPS JSON (same path as refreshCredits).
+ * Returns the credits object on success, null on failure.
  */
 export async function fetchUserStatus(id) {
-  const account = accounts.find(a => a.id === id);
-  if (!account) return null;
-
-  const { WindsurfClient } = await import('./client.js');
-  const { ensureLs, getLsFor } = await import('./langserver.js');
-  const proxy = getEffectiveProxy(account.id) || null;
-  await ensureLs(proxy);
-  const ls = getLsFor(proxy);
-  if (!ls) { log.warn(`No LS for GetUserStatus on ${account.id}`); return null; }
-
-  const client = new WindsurfClient(account.apiKey, ls.port, ls.csrfToken);
-  let status;
-  try {
-    status = await client.getUserStatus();
-  } catch (err) {
-    log.warn(`GetUserStatus ${account.id} (${account.email}) failed: ${err.message}`);
-    return null;
-  }
-
-  // Apply to account — authoritative tier + entitlement snapshot.
-  const prevTier = account.tier;
-  account.tier = status.tierName;
-  account.userStatus = {
-    teamsTier: status.teamsTier,
-    pro: status.pro,
-    planName: status.planName,
-    email: status.email,
-    displayName: status.displayName,
-    teamId: status.teamId,
-    isTeams: status.isTeams,
-    isEnterprise: status.isEnterprise,
-    hasPaidFeatures: status.hasPaidFeatures,
-    trialEndMs: status.trialEndMs,
-    promptCreditsUsed: status.userUsedPromptCredits,
-    flowCreditsUsed: status.userUsedFlowCredits,
-    monthlyPromptCredits: status.monthlyPromptCredits,
-    monthlyFlowCredits: status.monthlyFlowCredits,
-    maxPremiumChatMessages: status.maxPremiumChatMessages,
-    allowedModels: status.allowedModels,
-  };
-  account.userStatusLastFetched = Date.now();
-  if (status.email && !account.email.includes('@')) account.email = status.email;
-
-  // Mark every cascade-allowed enum as capable; every catalog enum NOT in the
-  // allowlist as not-entitled. Pure-UID models (no enum) are left to the
-  // canary probe since the server returns allowlists by enum only.
-  if (status.allowedModels.length > 0) {
-    if (!account.capabilities) account.capabilities = {};
-    const allowedEnums = new Set(status.allowedModels.map(m => m.modelEnum).filter(e => e > 0));
-    for (const [key, info] of Object.entries(MODELS)) {
-      if (!info.enumValue || info.enumValue <= 0) continue;
-      if (allowedEnums.has(info.enumValue)) {
-        account.capabilities[key] = { ok: true, lastCheck: Date.now(), reason: 'user_status' };
-      } else {
-        const prev = account.capabilities[key];
-        if (!prev || prev.reason !== 'success') {
-          // Respect a previously-validated success (can happen if allowlist is
-          // cascade-only while the model was reached via legacy endpoint).
-          account.capabilities[key] = { ok: false, lastCheck: Date.now(), reason: 'not_entitled' };
-        }
-      }
-    }
-  }
-
-  if (prevTier !== account.tier) {
-    log.info(`Tier change ${account.id} (${account.email}): ${prevTier} → ${account.tier} (plan="${status.planName}", ${status.allowedModels.length} allowed models)`);
-  } else {
-    log.info(`UserStatus ${account.id} (${account.email}): tier=${account.tier} plan="${status.planName}" allowed=${status.allowedModels.length}`);
-  }
-  saveAccounts();
-  return status;
+  const result = await refreshCredits(id);
+  return result.ok ? result.credits : null;
 }
 
 // Expanded canary set — one representative per routing path / provider family.
@@ -1475,8 +1366,9 @@ export async function probeAccount(id) {
 async function _probeAccountImpl(account) {
   try {
 
-  // ── Step 1: authoritative tier via GetUserStatus ──
-  const status = await fetchUserStatus(account.id);
+  // ── Step 1: authoritative tier via refreshCredits (HTTPS JSON) ──
+  const creditsResult = await refreshCredits(account.id);
+  const creditsOk = creditsResult.ok;
 
   const { WindsurfClient } = await import('./client.js');
   const { getModelInfo } = await import('./models.js');
@@ -1489,53 +1381,34 @@ async function _probeAccountImpl(account) {
   const port = ls.port;
   const csrf = ls.csrfToken;
 
-  // ── Step 2: canary probe, skipping models already classified by GetUserStatus ──
-  // When allowlist is available we only need to probe UID-only models (no enum,
-  // so server can't include them in allowlist) to get their actual status.
-  const needsProbe = PROBE_CANARIES.filter(key => {
-    const info = getModelInfo(key);
-    if (!info) return false;
-    // If GetUserStatus already gave us a definitive answer, skip.
-    if (status && info.enumValue > 0) {
-      const cap = account.capabilities?.[key];
-      if (cap && cap.reason === 'user_status') return false;
-      if (cap && cap.reason === 'not_entitled') return false;
-    }
-    return true;
-  });
+  // ── Step 2: canary probe ──
+  log.info(`Probing account ${account.id} (${account.email}) across ${PROBE_CANARIES.length} canary models (credits ${creditsOk ? 'OK' : 'unavailable'})`);
 
-  if (needsProbe.length > 0) {
-    log.info(`Probing account ${account.id} (${account.email}) across ${needsProbe.length} canary models (GetUserStatus ${status ? 'OK' : 'unavailable'})`);
-
-    for (const modelKey of needsProbe) {
-      const info = getModelInfo(modelKey);
-      if (!info) continue;
-      const useCascade = !!info.modelUid;
-      const client = new WindsurfClient(account.apiKey, port, csrf);
-      try {
-        if (useCascade) {
-          await client.cascadeChat([{ role: 'user', content: 'hi' }], info.enumValue, info.modelUid);
-        } else {
-          await client.rawGetChatMessage([{ role: 'user', content: 'hi' }], info.enumValue, info.modelUid);
-        }
-        updateCapability(account.apiKey, modelKey, true, 'success');
-        log.info(`  ${modelKey}: OK`);
-      } catch (err) {
-        const isRateLimit = /rate limit|rate_limit|too many requests|quota/i.test(err.message);
-        if (isRateLimit) {
-          log.info(`  ${modelKey}: RATE_LIMITED (skipped)`);
-        } else {
-          updateCapability(account.apiKey, modelKey, false, 'model_error');
-          log.info(`  ${modelKey}: FAIL (${err.message.slice(0, 80)})`);
-        }
+  for (const modelKey of PROBE_CANARIES) {
+    const info = getModelInfo(modelKey);
+    if (!info) continue;
+    const useCascade = !!info.modelUid;
+    const client = new WindsurfClient(account.apiKey, port, csrf);
+    try {
+      if (useCascade) {
+        await client.cascadeChat([{ role: 'user', content: 'hi' }], info.enumValue, info.modelUid);
+      } else {
+        await client.rawGetChatMessage([{ role: 'user', content: 'hi' }], info.enumValue, info.modelUid);
+      }
+      updateCapability(account.apiKey, modelKey, true, 'success');
+      log.info(`  ${modelKey}: OK`);
+    } catch (err) {
+      const isRateLimit = /rate limit|rate_limit|too many requests|quota/i.test(err.message);
+      if (isRateLimit) {
+        log.info(`  ${modelKey}: RATE_LIMITED (skipped)`);
+      } else {
+        updateCapability(account.apiKey, modelKey, false, 'model_error');
+        log.info(`  ${modelKey}: FAIL (${err.message.slice(0, 80)})`);
       }
     }
   }
 
   // ── Step 3: dynamic cloud candidate probe (#42) ──
-  // Probe models from the live cloud catalog that aren't in PROBE_CANARIES
-  // and haven't been classified yet. This discovers models available to free
-  // accounts beyond the hardcoded FREE_TIER_MODELS list.
   try {
     const allModels = Object.keys(MODELS);
     const alreadyProbed = new Set([
@@ -1547,7 +1420,6 @@ async function _probeAccountImpl(account) {
       if (alreadyProbed.has(k)) return false;
       const info = getModelInfo(k);
       if (!info?.modelUid) return false;
-      if (info.enumValue > 0 && status) return false;
       if ((info.credit || 1) > 2) return false;
       return true;
     }).slice(0, MAX_CLOUD_PROBES);
@@ -1579,13 +1451,10 @@ async function _probeAccountImpl(account) {
     log.warn(`Dynamic cloud probe failed: ${e.message}`);
   }
 
-  // If GetUserStatus succeeded, its tier decision wins over the inferred one
-  // (updateCapability rewrites tier via inferTier, so restore it afterwards).
-  if (status) account.tier = status.tierName;
-
   account.lastProbed = Date.now();
   saveAccounts();
-  log.info(`Probe complete for ${account.id}: tier=${account.tier}${status ? ` plan="${status.planName}"` : ''}`);
+  const planName = account.credits?.planName || '';
+  log.info(`Probe complete for ${account.id}: tier=${account.tier}${planName ? ` plan="${planName}"` : ''}`);
   return { tier: account.tier, capabilities: account.capabilities };
   } catch (err) {
     log.error(`Probe failed for ${account.id}: ${err.message}`);

@@ -2799,7 +2799,6 @@ const App = {
 
   renderAccountDetail(a) {
     const cr = a.credits || {};
-    const us = a.userStatus || {};
     const catalog = this._modelsCatalog || {};
     const fmtUnix = u => u ? new Date(u * 1000).toLocaleString() : '—';
     const fmtDate = v => v ? new Date(v).toLocaleDateString() : '—';
@@ -2887,7 +2886,7 @@ const App = {
             </div>
             <div class="detail-kv">
               <span class="k">last used</span><span class="v">${fmtAgo(a.lastUsed)}</span>
-              <span class="k">last probe</span><span class="v">${fmtAgo(a.lastProbed || a.userStatusLastFetched)}</span>
+              <span class="k">last probe</span><span class="v">${fmtAgo(a.lastProbed)}</span>
               <span class="k">credits @</span><span class="v">${fmtAgo(cr.fetchedAt)}</span>
             </div>
             <div class="detail-kv">

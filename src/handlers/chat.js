@@ -1678,7 +1678,7 @@ async function _handleChatCompletionsInner(body, context = {}) {
   // queue timeout → pool_exhausted.
   //
   // QQ-group 2026-04-30 follow-up: if the only ineligibility is that a
-  // freshly-added account hasn't been probed yet (userStatusLastFetched=0),
+  // freshly-added account hasn't been probed yet (lastProbed=0),
   // the unknown tier is now optimistic (= pro catalog) so this branch
   // shouldn't fire for that case. If we DO end up here with un-probed
   // accounts, surface a different message hinting at probe-pending state
@@ -1689,7 +1689,7 @@ async function _handleChatCompletionsInner(body, context = {}) {
     a.status === 'active' && (a.availableModels || []).includes(routingModelKey)
   );
   if (!anyEligible) {
-    const hasUnprobedActive = accounts.some(a => a.status === 'active' && !a.userStatusLastFetched);
+    const hasUnprobedActive = accounts.some(a => a.status === 'active' && !a.lastProbed);
     // v2.0.71 (#117 follow-up): list models the pool actually CAN serve so
     // the caller's dashboard / test harness can fall back instead of just
     // showing "model_not_entitled" with no hint. Build the union of
