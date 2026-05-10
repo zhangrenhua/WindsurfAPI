@@ -289,6 +289,15 @@ function reverseWebSearchArgs(cascade) {
   };
 }
 
+// ── WebFetch ↔ read_url_content (v2.0.93) ─────────────────────────
+// CortexStepReadUrlContent { url=1, summary=5 }
+function forwardWebFetchArgs(args) {
+  return { url: args.url || args.uri || args.link || '' };
+}
+function reverseWebFetchArgs(cascade) {
+  return { url: cascade.url || '', summary: cascade.summary || '' };
+}
+
 // ── apply_patch ↔ write_to_file (single-file fan-out, v2.0.70) ──
 // codex CLI's `apply_patch` ships a multi-file patch in a custom
 // grammar. Full fan-out (parsing the patch and emitting one
@@ -328,6 +337,10 @@ export const TOOL_MAP = {
   Edit:       { kind: 'propose_code',   forward: forwardClaudeEditArgs,   reverse: reverseClaudeEditArgs },
   MultiEdit:  { kind: 'propose_code',   forward: forwardClaudeEditArgs,   reverse: reverseClaudeEditArgs },
   WebSearch:  { kind: 'search_web',     forward: forwardWebSearchArgs,    reverse: reverseWebSearchArgs },
+  // v2.0.93 — ToolSearch is Claude Code's web search tool (same as WebSearch)
+  ToolSearch: { kind: 'search_web',     forward: forwardWebSearchArgs,    reverse: reverseWebSearchArgs },
+  // v2.0.93 — WebFetch is Claude Code's URL fetch tool (map to read_url_content)
+  WebFetch:   { kind: 'read_url_content', forward: forwardWebFetchArgs,   reverse: reverseWebFetchArgs },
 
   // Codex CLI (already speaks cascade-ish vocabulary)
   view_file:       { kind: 'view_file',      forward: identityArgs, reverse: identityArgs },
@@ -616,17 +629,27 @@ function buildSearchWebBody(args) {
   return Buffer.concat(parts);
 }
 
+// v2.0.93 — read_url_content (CortexStepReadUrlContent = field 40 oneof).
+//   url     = 1 string
+//   summary = 5 string  (server-filled)
+function buildReadUrlContentBody(args) {
+  const parts = [];
+  if (args.url) parts.push(writeStringField(1, args.url));
+  if (typeof args.summary === 'string') parts.push(writeStringField(5, args.summary));
+  return Buffer.concat(parts);
+}
+
 const STEP_BODY_BUILDER = {
-  view_file:       buildViewFileBody,
-  run_command:     buildRunCommandBody,
-  grep_search_v2:  buildGrepSearchV2Body,
-  grep_search:     buildGrepSearchV2Body,
-  find:            buildFindBody,
-  list_directory:  buildListDirectoryBody,
-  write_to_file:   buildWriteToFileBody,
-  // v2.0.70 — propose_code + search_web encoders shipped.
-  propose_code:    buildProposeCodeBody,
-  search_web:      buildSearchWebBody,
+  view_file:         buildViewFileBody,
+  run_command:       buildRunCommandBody,
+  grep_search_v2:    buildGrepSearchV2Body,
+  grep_search:       buildGrepSearchV2Body,
+  find:              buildFindBody,
+  list_directory:    buildListDirectoryBody,
+  write_to_file:     buildWriteToFileBody,
+  propose_code:      buildProposeCodeBody,
+  search_web:        buildSearchWebBody,
+  read_url_content:  buildReadUrlContentBody,
 };
 
 /**
@@ -783,18 +806,25 @@ function decodeSearchWebStep(buf) {
   };
 }
 
+function decodeReadUrlContentStep(buf) {
+  const f = parseFields(buf);
+  return {
+    url: getField(f, 1, 2)?.value?.toString('utf8') || '',
+    summary: getField(f, 5, 2)?.value?.toString('utf8') || '',
+  };
+}
+
 const STEP_BODY_DECODER = {
-  view_file:       decodeViewFileStep,
-  run_command:     decodeRunCommandStep,
-  grep_search_v2:  decodeGrepSearchV2Step,
-  grep_search:     decodeGrepSearchV2Step,
-  find:            decodeFindStep,
-  list_directory:  decodeListDirectoryStep,
-  write_to_file:   decodeWriteToFileStep,
-  // v2.0.70 — propose_code / search_web decoders for trajectory→tool_call
-  // reverse mapping.
-  propose_code:    decodeProposeCodeStep,
-  search_web:      decodeSearchWebStep,
+  view_file:         decodeViewFileStep,
+  run_command:       decodeRunCommandStep,
+  grep_search_v2:    decodeGrepSearchV2Step,
+  grep_search:       decodeGrepSearchV2Step,
+  find:              decodeFindStep,
+  list_directory:    decodeListDirectoryStep,
+  write_to_file:     decodeWriteToFileStep,
+  propose_code:      decodeProposeCodeStep,
+  search_web:        decodeSearchWebStep,
+  read_url_content:  decodeReadUrlContentStep,
 };
 
 /**
@@ -927,6 +957,8 @@ export function buildAdditionalStepsFromHistory(messages) {
             .map(s => s.trim())
             .filter(Boolean);
         } else if (entry.kind === 'search_web') {
+          cascadeArgs.summary = observation;
+        } else if (entry.kind === 'read_url_content') {
           cascadeArgs.summary = observation;
         }
       }

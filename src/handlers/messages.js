@@ -44,10 +44,26 @@ function genThinkingSignature() {
 //   code_execution_20250522 server-side python sandbox
 //   advisor_20260301        Anthropic Advisor Strategy (sonnet+opus pair)
 const SERVER_SIDE_ANTHROPIC_TOOL_TYPES = new Set([
-  'web_search_20250305',
+  // v2.0.93: web_search_20250305 now mapped to function web_search via cascade search_web.
+  // Keep code_execution (sandbox) and advisor removed — no cascade equivalents.
   'code_execution_20250522',
   'advisor_20260301',
 ]);
+
+// v2.0.93: convert server-side Anthropic tools to function tools we can handle.
+function convertServerSideTool(t) {
+  if (t?.type === 'web_search_20250305') {
+    return {
+      type: 'function',
+      function: {
+        name: 'web_search',
+        description: t.description || 'Search the web',
+        parameters: t.input_schema || { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+      },
+    };
+  }
+  return null;
+}
 
 function sha256Hex(value) {
   return createHash('sha256').update(String(value || '')).digest('hex');
@@ -216,9 +232,19 @@ function anthropicToOpenAI(body) {
   // a normal function tool_use for "advisor" the client will never get
   // a server_tool_result for.
   const droppedServerTools = [];
+  const convertedServerTools = [];
   const tools = (body.tools || []).reduce((acc, t) => {
     if (t?.type && SERVER_SIDE_ANTHROPIC_TOOL_TYPES.has(t.type)) {
       droppedServerTools.push(t.type);
+      return acc;
+    }
+    // v2.0.93: web_search_20250305 is now converted to a function tool
+    if (t?.type === 'web_search_20250305') {
+      const converted = convertServerSideTool(t);
+      if (converted) {
+        acc.push(converted);
+        convertedServerTools.push('web_search_20250305→web_search');
+      }
       return acc;
     }
     acc.push({
@@ -233,6 +259,9 @@ function anthropicToOpenAI(body) {
   }, []);
   if (droppedServerTools.length) {
     log.info(`messages: dropped ${droppedServerTools.length} server-side tool(s) [${[...new Set(droppedServerTools)].join(',')}] - proxy does not implement them yet`);
+  }
+  if (convertedServerTools.length) {
+    log.info(`messages: converted ${convertedServerTools.length} server-side tool(s) [${convertedServerTools.join(',')}]`);
   }
   const forwardedToolChoice = pruneToolChoice(
     body.tool_choice ? mapAnthropicToolChoice(body.tool_choice) : undefined,
